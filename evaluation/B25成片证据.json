@@ -1,0 +1,182 @@
+{
+  "recording": {
+    "release": "tax-harness-0.1.0-b25",
+    "source_zip_sha256": "90aedf976366a588378085734718137454e897649925d6666f71aed444ceebfd",
+    "manifest_sha256": "aa59475aa36a12c17761e83664470a8531583db95d71b9e7c9abf28a187070ca",
+    "material_zip_sha256": "c05e65621daeabae00783e0bea861f90ec616bb876786babeab60c82e3e6248b",
+    "runtime_source_sha256": "1341efb8021d8cf8f6f3592351a7f8d21ae0a63912e65764183eb7f29a39ca46",
+    "model_mode": "本地 HTTP 模型替身 fixture-b25",
+    "model_requests_matched_audit": 13,
+    "operation_count": 1,
+    "readback": {
+      "operation_id": "turn-op-d5c468d422d84e49631450d8e8522914f9fbfaa1ae88b974a168ffd7e2b43088",
+      "record": {
+        "enterprise_id": "C001",
+        "invoice_id": "F002",
+        "invoice_date": "2026-09-08",
+        "seller": "书林图文（模拟）",
+        "item_name": "复印纸、打印服务",
+        "amount_cents": 80000,
+        "purpose": "培训资料打印",
+        "note": "票据已核对",
+        "revision": 2
+      }
+    },
+    "reset_matches_fresh": true,
+    "prior_database_unchanged": true,
+    "browser": {
+      "release": "tax-harness-0.1.0-b25",
+      "manifest_sha256": "aa59475aa36a12c17761e83664470a8531583db95d71b9e7c9abf28a187070ca",
+      "version_display": "tax-harness-0.1.0-b25 | manifest SHA-256 aa59475aa36a12c17761e83664470a8531583db95d71b9e7c9abf28a187070ca\n已核对 46 个提交文件\n已安装的运行代码与提交包一致",
+      "operation": "turn-op-d5c468d422d84e49631450d8e8522914f9fbfaa1ae88b974a168ffd7e2b43088",
+      "before": {
+        "enterprise_id": "C001",
+        "invoice_id": "F002",
+        "invoice_date": "2026-09-08",
+        "seller": "书林图文（模拟）",
+        "item_name": "复印纸、打印服务",
+        "amount_cents": 80000,
+        "purpose": null,
+        "note": null,
+        "revision": 1
+      },
+      "after": {
+        "enterprise_id": "C001",
+        "invoice_id": "F002",
+        "invoice_date": "2026-09-08",
+        "seller": "书林图文（模拟）",
+        "item_name": "复印纸、打印服务",
+        "amount_cents": 80000,
+        "purpose": "培训资料打印",
+        "note": "票据已核对",
+        "revision": 2
+      },
+      "independent_readback": {
+        "invoice_id": "F002",
+        "purpose": "培训资料打印",
+        "note": "票据已核对",
+        "revision": 2
+      },
+      "trace": [
+        {
+          "kind": "version_visible",
+          "value": "aa59475aa36a12c17761e83664470a8531583db95d71b9e7c9abf28a187070ca",
+          "at_s": 0.22
+        },
+        {
+          "kind": "query_and_rule",
+          "value": "助手：发票总额 9622.06 元，银行收入 13000.50 元，支出 7180.74 元。\n依据：甲企业发票用途规则 2.0（R002 / main）",
+          "at_s": 24.53
+        },
+        {
+          "kind": "memory_saved",
+          "value": "回复先列金额汇总",
+          "at_s": 43.62
+        },
+        {
+          "kind": "alpha_missing",
+          "value": "助手：缺项 F002、F003、F004、F006、F009。你要补哪张发票？\n待办：缺项 F002、F003、F004、F006、F009。你要补哪张发票？",
+          "at_s": 63.47
+        },
+        {
+          "kind": "interruption",
+          "value": "助手：银行收入 13000.50 元。\n待办：请指定要补用途的发票编号。",
+          "at_s": 93.84
+        },
+        {
+          "kind": "resumed_new_session",
+          "value": "助手：已恢复 C001 2026-09 的任务。请指定要补用途的发票编号。\n待办：请指定要补用途的发票编号。",
+          "at_s": 117.77
+        },
+        {
+          "kind": "first_proposal",
+          "value": "助手：拟修改 C001 2026-09 发票 F002：用途改为\"办公资料\"，备注改为\"票据已核对\"。请回复‘确认保存’或‘取消保存’。\n待办：确认或取消保存",
+          "at_s": 135.36
+        },
+        {
+          "kind": "corrected_proposal_no_write",
+          "value": "助手：拟修改 C001 2026-09 发票 F002：用途改为\"培训资料打印\"，备注改为\"票据已核对\"。请回复‘确认保存’或‘取消保存’。\n待办：确认或取消保存",
+          "at_s": 152.37
+        },
+        {
+          "kind": "save_confirmed",
+          "value": "turn-op-d5c468d422d84e49631450d8e8522914f9fbfaa1ae88b974a168ffd7e2b43088",
+          "at_s": 173.08
+        },
+        {
+          "kind": "readback_record_visible",
+          "value": "turn-op-d5c468d422d84e49631450d8e8522914f9fbfaa1ae88b974a168ffd7e2b43088",
+          "at_s": 191.26
+        },
+        {
+          "kind": "actual_context_visible",
+          "value": {
+            "state": {
+              "scope": {
+                "user_id": "U001",
+                "enterprise_id": "C001",
+                "month": "2026-09"
+              },
+              "task_id": "02d32c8b3fb64ab0aeecadfe5cb8a29d",
+              "revision": 5,
+              "state": {
+                "question": "请指定要补用途的发票编号。",
+                "object_id": null,
+                "historical_read_only": false
+              }
+            },
+            "pref": "回复先列金额汇总"
+          },
+          "at_s": 203.68
+        },
+        {
+          "kind": "independent_readback",
+          "value": {
+            "invoice_id": "F002",
+            "purpose": "培训资料打印",
+            "note": "票据已核对",
+            "revision": 2
+          },
+          "at_s": 218.54
+        },
+        {
+          "kind": "beta_threshold",
+          "value": "助手：1000.00 元及以上须填用途，缺项 F002、F005、F006。\n依据：乙企业发票用途规则 1.0（R003 / main）",
+          "at_s": 239.08
+        }
+      ],
+      "duration_wall_s": 279.63
+    }
+  },
+  "media": {
+    "video_seconds": 275.0,
+    "width": 1600,
+    "height": 1000,
+    "video_codec": "H.264",
+    "audio_codec": "AAC",
+    "frames_reviewed_at_s": [
+      5,
+      16,
+      29,
+      47,
+      56,
+      68,
+      82,
+      104,
+      124,
+      141,
+      163,
+      183,
+      198,
+      211,
+      226,
+      248,
+      270
+    ],
+    "manifest_frame_at_s": 5,
+    "manifest_frame_crop_mean_abs_pixel_difference": 6.192,
+    "manifest_text_mask_iou": 0.9126,
+    "video_sha256": "b57fdc634e0ba32959f96aadc08bbf18097a6ff28efbf9bac7decd4362bcc85f",
+    "video_bytes": 11468805
+  }
+}

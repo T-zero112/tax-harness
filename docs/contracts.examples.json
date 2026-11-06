@@ -1,0 +1,51 @@
+{
+  "scope": {
+    "user_id": "U001",
+    "enterprise_id": "C001",
+    "month": "2026-09"
+  },
+  "request": {
+    "request_id": "r1",
+    "session_id": "s1",
+    "enterprise_id": "C001",
+    "month": "2026-09",
+    "text": "查一下九月发票"
+  },
+  "response": {
+    "request_id": "r1",
+    "task_id": "t1",
+    "task_status": "waiting_user",
+    "reply": "请补充这张发票的用途。",
+    "pending_items": [
+      "F001 用途"
+    ],
+    "operation_ids": [],
+    "citations": []
+  },
+  "tool_success": {
+    "status": "succeeded",
+    "object_id": null,
+    "data": {
+      "amount_cents": 100000
+    },
+    "error": null,
+    "operation_id": null
+  },
+  "tool_unknown": {
+    "status": "unknown",
+    "object_id": null,
+    "data": null,
+    "error": {
+      "code": "unknown_result",
+      "message": "结果待核验",
+      "retryable": false
+    },
+    "operation_id": "o1"
+  },
+  "citation": {
+    "doc_id": "R002",
+    "name": "甲企业发票用途规则",
+    "version": "2.0",
+    "entry": "用途填写要求"
+  }
+}

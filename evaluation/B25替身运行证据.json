@@ -1,0 +1,128 @@
+{
+  "release": "tax-harness-0.1.0-b25",
+  "mode": "本机 HTTP 模型替身 fixture-b25，浏览器工作台实测",
+  "runtime_source_sha256": "1341efb8021d8cf8f6f3592351a7f8d21ae0a63912e65764183eb7f29a39ca46",
+  "material_zip_sha256": "c05e65621daeabae00783e0bea861f90ec616bb876786babeab60c82e3e6248b",
+  "installation": "Python 3.12.7 新虚拟环境，锁定依赖，非 editable 安装，已校验安装代码",
+  "import": {
+    "material_version": "1.1.0",
+    "invoices": 40,
+    "bank_transactions": 48,
+    "rule_versions": 5,
+    "scopes": [
+      {
+        "enterprise_id": "C001",
+        "month": "2026-08",
+        "invoice_count": 10,
+        "bank_count": 12,
+        "invoice_cents": 904635,
+        "expense_cents": 572099,
+        "income_cents": 1485075
+      },
+      {
+        "enterprise_id": "C001",
+        "month": "2026-09",
+        "invoice_count": 10,
+        "bank_count": 12,
+        "invoice_cents": 962206,
+        "expense_cents": 718074,
+        "income_cents": 1300050
+      },
+      {
+        "enterprise_id": "C002",
+        "month": "2026-08",
+        "invoice_count": 10,
+        "bank_count": 12,
+        "invoice_cents": 1366705,
+        "expense_cents": 934110,
+        "income_cents": 1880025
+      },
+      {
+        "enterprise_id": "C002",
+        "month": "2026-09",
+        "invoice_count": 10,
+        "bank_count": 12,
+        "invoice_cents": 1266724,
+        "expense_cents": 808724,
+        "income_cents": 1370075
+      }
+    ]
+  },
+  "missing_model_http_status": 503,
+  "browser": {
+    "query": "助手：发票总额 9622.06 元，银行收入 13000.50 元，支出 7180.74 元。\n依据：甲企业发票用途规则 2.0（R002 / main）",
+    "alpha": "助手：缺项 F002、F003、F004、F006、F009。你要补哪张发票？\n待办：缺项 F002、F003、F004、F006、F009。你要补哪张发票？",
+    "inserted": "助手：银行收入 13000.50 元。\n待办：请指定要补用途的发票编号。",
+    "recovered": "助手：已恢复 C001 2026-09 的任务。请指定要补用途的发票编号。\n待办：请指定要补用途的发票编号。",
+    "saved": "助手：发票 F002 已保存并回查确认。\n操作：turn-op-7162322dec1540f97b4477d7c65e5d1b9573c1fbea9881cb0e62390bf561f74c",
+    "beta": "助手：1000.00 元及以上须填用途，缺项 F002、F005、F006。\n依据：乙企业发票用途规则 1.0（R003 / main）",
+    "operation": "turn-op-7162322dec1540f97b4477d7c65e5d1b9573c1fbea9881cb0e62390bf561f74c",
+    "before": {
+      "enterprise_id": "C001",
+      "invoice_id": "F002",
+      "invoice_date": "2026-09-08",
+      "seller": "书林图文（模拟）",
+      "item_name": "复印纸、打印服务",
+      "amount_cents": 80000,
+      "purpose": null,
+      "note": null,
+      "revision": 1
+    },
+    "after": {
+      "enterprise_id": "C001",
+      "invoice_id": "F002",
+      "invoice_date": "2026-09-08",
+      "seller": "书林图文（模拟）",
+      "item_name": "复印纸、打印服务",
+      "amount_cents": 80000,
+      "purpose": "培训资料打印",
+      "note": "票据已核对",
+      "revision": 2
+    },
+    "browser_seconds": 10
+  },
+  "reset": {
+    "fresh_database_matches_first_import": true,
+    "prior_database_unchanged": true,
+    "initial_state": {
+      "counts": {
+        "invoices": 40,
+        "bank_transactions": 48,
+        "rules": 7,
+        "tasks": 0,
+        "operations": 0,
+        "events": 0,
+        "messages": 0,
+        "memories": 0
+      },
+      "F002_C001": [
+        null,
+        null,
+        1
+      ]
+    }
+  },
+  "audit": {
+    "captured_model_requests_match_audit": 13,
+    "model_key_absent": true,
+    "operation_count": 1,
+    "save_readback": {
+      "operation_id": "turn-op-7162322dec1540f97b4477d7c65e5d1b9573c1fbea9881cb0e62390bf561f74c",
+      "record": {
+        "enterprise_id": "C001",
+        "invoice_id": "F002",
+        "invoice_date": "2026-09-08",
+        "seller": "书林图文（模拟）",
+        "item_name": "复印纸、打印服务",
+        "amount_cents": 80000,
+        "purpose": "培训资料打印",
+        "note": "票据已核对",
+        "revision": 2
+      }
+    }
+  },
+  "regression": {
+    "passed": 67,
+    "warnings": 1
+  }
+}

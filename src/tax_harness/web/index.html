@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>财税工作台</title>
+  <link rel="stylesheet" href="/assets/workbench.css">
+  <script type="module" src="/assets/workbench.js"></script>
+</head>
+<body>
+  <header class="masthead"><div><p class="kicker">赛题二</p><h1>财税工作台</h1></div><a href="/docs">接口文档</a></header>
+  <main class="layout">
+    <aside aria-label="业务范围">
+      <h2>当前范围</h2>
+      <form id="scope">
+        <label>测试用户<select name="user"><option value="U001">U001 · 可查看和修改</option><option value="U002">U002 · 甲企业只读</option></select></label>
+        <label>企业<select name="enterprise"><option value="C001">甲企业 · C001</option><option value="C002">乙企业 · C002</option></select></label>
+        <label>月份<input name="month" type="month" value="2026-09" required></label>
+        <button type="submit">切换范围</button>
+      </form>
+      <dl class="counts"><div><dt>发票</dt><dd id="invoice-count">—</dd></div><div><dt>银行流水</dt><dd id="bank-count">—</dd></div></dl>
+    </aside>
+    <div class="content">
+      <nav aria-label="工作区"><button data-panel="rules" aria-current="page">业务规则</button><button data-panel="memory">长期偏好</button><button data-panel="records">运行记录</button><button data-panel="chat">对话</button></nav>
+      <p id="status" role="status" aria-live="polite"></p>
+      <section id="rules">
+        <div class="section-head"><h2>业务规则</h2><button id="new-rule" class="secondary">添加版本</button></div>
+        <form id="rule-search" class="inline"><label>按名称或正文检索<input name="query" type="search" placeholder="例如 发票用途"></label><button type="submit">检索适用规则</button><button type="reset" class="secondary">全部版本</button></form>
+        <div id="rule-list"></div>
+      </section>
+      <section id="memory" hidden>
+        <div class="section-head"><h2>长期偏好</h2></div>
+        <form id="memory-form" class="editor">
+          <label>来源消息<select name="source_message_id" required></select></label>
+          <label>偏好内容<textarea name="content" rows="2" required></textarea></label>
+          <label class="check"><input type="checkbox" name="user_wide">用于我有权访问的所有企业</label>
+          <button>保存偏好</button>
+        </form>
+        <div id="memory-list"></div>
+      </section>
+      <section id="records" hidden><div class="section-head"><h2>运行记录</h2><button id="refresh" class="secondary">刷新</button></div><div id="record-list"></div></section>
+      <section id="chat" hidden>
+        <h2>对话</h2><p id="chat-state"></p><ol id="chat-log"></ol>
+        <form id="chat-form" hidden class="editor"><label>消息<textarea name="text" rows="3" required></textarea></label><button>发送</button></form>
+      </section>
+    </div>
+  </main>
+  <dialog id="rule-dialog">
+    <form id="rule-form" class="editor">
+      <h2>添加规则版本</h2>
+      <div class="fields"><label>规则编号<input name="doc_id" required maxlength="24"></label><label>版本<input name="version" required maxlength="24"></label></div>
+      <label>名称<input name="name" required></label><label>生效日期<input name="effective_from" type="date" required></label>
+      <label>正文<textarea name="content" rows="5" required></textarea></label>
+      <div class="actions"><button type="button" id="cancel-rule" class="secondary">取消</button><button>保存版本</button></div>
+      <p id="rule-error" role="status" aria-live="polite"></p>
+    </form>
+  </dialog>
+</body>
+</html>
