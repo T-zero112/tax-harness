@@ -1,0 +1,116 @@
+x-import-env: &import-env
+  IMPORT_TOKEN: ${PRODUCT_IMPORT_TOKEN:?set PRODUCT_IMPORT_TOKEN}
+  S3_USER: product
+  S3_PASSWORD: ${PRODUCT_S3_PASSWORD:?set PRODUCT_S3_PASSWORD}
+
+services:
+  db:
+    image: pgvector/pgvector:0.8.6-pg17-trixie
+    environment:
+      POSTGRES_DB: tax_product
+      POSTGRES_USER: tax_product
+      POSTGRES_PASSWORD: ${PRODUCT_DB_PASSWORD:?set PRODUCT_DB_PASSWORD}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01-product.sql:ro
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U tax_product -d tax_product -h 127.0.0.1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  redis:
+    image: redis:alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  objects:
+    image: chrislusf/seaweedfs@sha256:ccad23e18639c8b98cee17e7100b95830a06077b56d8e5b006d6dcf8ec5e94a0
+    command: ["mini", "-dir=/data"]
+    environment:
+      AWS_ACCESS_KEY_ID: product
+      AWS_SECRET_ACCESS_KEY: ${PRODUCT_S3_PASSWORD:?set PRODUCT_S3_PASSWORD}
+      S3_BUCKET: invoice-imports
+    volumes:
+      - object-data:/data
+    healthcheck:
+      test: [CMD, nc, -z, "127.0.0.1", "8333"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  importer:
+    build: ./importer
+    image: tax-product-importer
+    environment: *import-env
+    depends_on:
+      objects: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  worker:
+    image: tax-product-importer
+    pull_policy: never
+    command: ["celery", "-A", "app.celery", "worker", "--concurrency=1", "--loglevel=INFO"]
+    environment: *import-env
+    depends_on:
+      importer: {condition: service_healthy}
+    healthcheck:
+      test: [CMD-SHELL, "celery -A app.celery inspect ping -d celery@$$HOSTNAME --timeout=3"]
+      interval: 15s
+      timeout: 8s
+      retries: 10
+  agent:
+    build: ./agent
+    environment:
+      AGENT_TOKEN: ${PRODUCT_AGENT_TOKEN:?set PRODUCT_AGENT_TOKEN}
+    volumes:
+      - embeddings:/embedding-cache
+      - ./models:/models:ro
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  business:
+    build: ./business
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/tax_product
+      SPRING_DATASOURCE_USERNAME: tax_product
+      SPRING_DATASOURCE_PASSWORD: ${PRODUCT_DB_PASSWORD:?set PRODUCT_DB_PASSWORD}
+      SPRING_DATA_REDIS_HOST: redis
+      PRODUCT_AGENT_TOKEN: ${PRODUCT_AGENT_TOKEN:?set PRODUCT_AGENT_TOKEN}
+      PRODUCT_IMPORT_TOKEN: ${PRODUCT_IMPORT_TOKEN:?set PRODUCT_IMPORT_TOKEN}
+      PRODUCT_ALPHA_PASSWORD: ${PRODUCT_ALPHA_PASSWORD:?set PRODUCT_ALPHA_PASSWORD}
+      PRODUCT_BETA_PASSWORD: ${PRODUCT_BETA_PASSWORD:?set PRODUCT_BETA_PASSWORD}
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      agent: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, curl, -fsS, "http://127.0.0.1:8080/actuator/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  web:
+    build: ./web
+    ports:
+      - "127.0.0.1:${PRODUCT_HTTP_PORT:-3100}:3000"
+    depends_on:
+      business: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+volumes:
+  db-data:
+  embeddings:
+  redis-data:
+  object-data:
