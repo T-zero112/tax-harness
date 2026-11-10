@@ -4,7 +4,7 @@ Windows 上从仓库根目录执行 `powershell -ExecutionPolicy Bypass -File pr
 
 Next.js 将业务 API 交给 Spring Boot。Java 从 HttpOnly 会话 Cookie 获取 Redis 会话，由会话确定租户，再查询 PostgreSQL。两租户均有 C001，返回各自的企业名称。点击企业旁的连接检查，可接收经 Java 转发的 FastAPI SSE 事件。LangGraph 当前执行连通性探针。
 
-从仓库根目录执行 `python product/verify.py` 检查匿名拒绝、错误密码、租户隔离、SSE 和退出登录。执行 `docker compose -f product/compose.yaml --env-file product/.env ps` 查看五个服务状态。日常停止用 `docker compose -f product/compose.yaml --env-file product/.env stop`，业务库持久卷会保留。
+从仓库根目录执行 `python product/verify.py` 检查匿名拒绝、错误密码、租户隔离、SSE 和退出登录。执行 `docker compose -f product/compose.yaml --env-file product/.env ps` 查看服务状态。日常停止用 `docker compose -f product/compose.yaml --env-file product/.env stop`，业务库持久卷会保留。
 
 工作台提供回环地址的 HTTP 开发入口和可选的本地 HTTPS 配置。比赛验收和产品版验收分别记录。
 
@@ -87,22 +87,28 @@ python product/verify.py
 
 ### 独立验收环境
 
-从干净检出启动时，可用 Compose 项目名和端口将验收与现有实例隔离。首次启动生成自己的凭据、证书和数据卷。先预热模型以完成下载和哈希校验，再开始规则验收。
+需要 Windows PowerShell、运行 Linux 容器的 Docker、支持 `!reset` 的 Docker Compose、Python 3.12，以及 PATH 上的 OpenSSL。首次构建需要访问镜像和依赖仓库，模型可联网下载或按上文离线准备。从干净检出或解压源码包后，在包含 `product/` 的目录执行以下命令。验收使用单独的 Compose 项目名、镜像标签和端口，首次启动会生成独立的凭据、证书和数据卷。若这些名称或端口已占用，换成未使用的值并同步调整测试入口。
 
 ```powershell
 $env:COMPOSE_PROJECT_NAME = 'tax-product-acceptance'
 $env:PRODUCT_IMPORTER_IMAGE = 'tax-product-acceptance-importer'
 $env:PRODUCT_HTTP_PORT = '13100'
 $env:PRODUCT_HTTPS_PORT = '13443'
+python -m venv .venv
+.venv/Scripts/python.exe -m pip install -r product/requirements-verify.txt
 powershell -ExecutionPolicy Bypass -File product/start.ps1 -Https
 docker compose --project-directory product exec -T agent python -c "from main import embedding_model; print(len(next(embedding_model().embed(['invoice']))))"
-python -m pip install -r product/requirements-verify.txt
-python product/verify_https.py
-$env:PRODUCT_TEST_BASE = 'https://localhost:13443'
+.venv/Scripts/python.exe product/verify_https.py
+$env:PRODUCT_TEST_BASE = 'https://127.0.0.1:13443'
 $env:SSL_CERT_FILE = (Resolve-Path product/tls/local/ca.crt).Path
-python product/verify_access.py
-python product/verify.py
-python product/verify.py --p3
-python product/verify_import.py
-python product/verify_bank.py
+.venv/Scripts/python.exe product/verify_access.py
+.venv/Scripts/python.exe product/verify.py
+.venv/Scripts/python.exe product/verify.py --p3
+.venv/Scripts/python.exe product/verify_import.py
+.venv/Scripts/python.exe product/verify_bank.py
+.venv/Scripts/python.exe product/verify_restore.py
 ```
+
+首次启动完成后，数据库应有 2 个租户、3 家企业、2 个账号、3 张发票、4 条银行流水、3 条规则，导入任务和发票审计均为 0。Flyway 应到达 V6。规则验收前的模型预热应输出 `384`，空缓存需下载约 252 MB。测试会修改合成发票、规则和导入任务，恢复演练会生成本机备份。保留数据并停止验收服务时，使用 `docker compose -f product/compose.yaml -f product/compose.https.yaml stop`。
+
+交付源码由 Git 标签导出，复验结果见 [交付归档验收](P4验收记录.md#产品版-v010-交付归档)。源码包的 SHA-256 和对应提交号随包提供。
