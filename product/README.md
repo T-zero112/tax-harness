@@ -24,7 +24,7 @@ Java 通过 Flyway V2 在原 P1 数据卷上增加发票、建议和审计表。
 
 工作台「规则版本与检索」支持按企业查看版本和按会计期间检索。alpha 可以创建草稿、发布和退役。版本内容创建后固定，修改用新版本。生效月份包含当月，失效月份从该月起排除。退役将该版本移出所有实时检索，已保存回执仍保留原引用。发票核验使用发票自己的会计期间。
 
-Java 先在 PostgreSQL 中固定当前租户、企业、会计期间和已发布版本的候选集，再用字面匹配与 pgvector 余弦分数排序。语义向量由 Agent 的 FastEmbed 多语言 MiniLM 模型生成，384 维。可在 `product/models` 放置该模型的 ONNX 和分词器文件，首次检索会优先加载本地文件。缺少本地文件时下载到 Compose 的 embedding 缓存卷。
+Java 先在 PostgreSQL 中固定当前租户、企业、会计期间和已发布版本的候选集，再用字面匹配与 pgvector 余弦分数排序。语义向量由 Agent 的 FastEmbed 多语言 MiniLM 模型生成，384 维。版本和文件哈希见 `product/agent/model-artifacts.json`。可在 `product/models` 放置清单中匹配的文件，或由 Agent 下载固定版本到 Compose 的 embedding 缓存卷。
 
 发票规则适用范围内缺少条款、同一规则条款有重叠版本或必填字段要求不一致时，保存人工复核记录并返回编号。补全建议与审计回执保留规则来源、版本和条款。人工确认时重新检查适用规则，遇到旧版或冲突退回重新核验。历史已确认回执按原幂等键仍可重放。
 
@@ -87,13 +87,15 @@ python product/verify.py
 
 ### 独立验收环境
 
-从干净检出启动时，可用 Compose 项目名和端口将验收与现有实例隔离。首次启动生成自己的凭据、证书和数据卷。首次规则查询由 Agent 下载本地嵌入模型到该项目的缓存卷。
+从干净检出启动时，可用 Compose 项目名和端口将验收与现有实例隔离。首次启动生成自己的凭据、证书和数据卷。先预热模型以完成下载和哈希校验，再开始规则验收。
 
 ```powershell
 $env:COMPOSE_PROJECT_NAME = 'tax-product-acceptance'
+$env:PRODUCT_IMPORTER_IMAGE = 'tax-product-acceptance-importer'
 $env:PRODUCT_HTTP_PORT = '13100'
 $env:PRODUCT_HTTPS_PORT = '13443'
 powershell -ExecutionPolicy Bypass -File product/start.ps1 -Https
+docker compose --project-directory product exec -T agent python -c "from main import embedding_model; print(len(next(embedding_model().embed(['invoice']))))"
 python -m pip install -r product/requirements-verify.txt
 python product/verify_https.py
 $env:PRODUCT_TEST_BASE = 'https://localhost:13443'

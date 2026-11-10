@@ -1,3 +1,5 @@
+import hashlib
+import json
 import os
 import secrets
 from functools import lru_cache
@@ -9,6 +11,8 @@ from fastapi.responses import StreamingResponse
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 from fastembed import TextEmbedding
+from huggingface_hub import snapshot_download
+from huggingface_hub.errors import LocalEntryNotFoundError
 
 
 class ProbeState(TypedDict):
@@ -78,10 +82,25 @@ class EmbedRequest(BaseModel):
 
 @lru_cache(maxsize=1)
 def embedding_model():
+    spec = json.loads(Path(__file__).with_name("model-artifacts.json").read_text(encoding="utf-8"))
     local = Path("/models")
-    options = {"specific_model_path": str(local)} if (local / "model_optimized.onnx").is_file() else {}
+    if not (local / "model_optimized.onnx").is_file():
+        options = {
+            "repo_id": spec["repo_id"], "revision": spec["revision"], "cache_dir": "/embedding-cache",
+            "allow_patterns": list(spec["sha256"]), "token": False,
+        }
+        try:
+            local = Path(snapshot_download(**options, local_files_only=True))
+        except LocalEntryNotFoundError:
+            local = Path("/embedding-cache/unavailable")
+        if not all((local / name).is_file() for name in spec["sha256"]):
+            local = Path(snapshot_download(**options))
+    for name, expected in spec["sha256"].items():
+        with (local / name).open("rb") as stream:
+            if hashlib.file_digest(stream, "sha256").hexdigest() != expected:
+                raise RuntimeError(f"Embedding artifact checksum mismatch: {name}")
     return TextEmbedding("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-                         cache_dir="/embedding-cache", threads=2, **options)
+                         cache_dir="/embedding-cache", threads=2, specific_model_path=str(local))
 
 
 @app.post("/internal/embed")
