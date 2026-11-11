@@ -122,13 +122,15 @@ def validate(state):
 
 def execute(state):
     name, arguments = state["tool"], state["arguments"]
+    tool_started = time.monotonic()
     events = [event("tool_call", {"tool": name, "arguments": arguments})]
     try:
         result = tools.invoke(name, arguments, state["body"]["call_token"])
     except (httpx.HTTPError, ValueError):
         result = {"status": "unknown" if name == "create_proposal" else "failed",
                   "error": {"code": "tool_unavailable", "message": "业务调用结果待核实，请查询后重试。"}, "data": {}}
-    events.append(event("tool_result", {"tool": name, "result": result}))
+    events.append(event("tool_result", {"tool": name, "result": result,
+                                         "duration_ms": int((time.monotonic()-tool_started)*1000)}))
     if result["status"] != "succeeded":
         # Never retry a potentially persisted proposal after a transport failure.
         if name == "create_proposal":
@@ -168,7 +170,8 @@ graph = builder.compile()
 def stream(body):
     scope = body["scope"]
     started = time.monotonic()
-    trace = {"decisions": [], "events": [], "context_snapshots": [], "trimming": [], "context_bytes": 0}
+    trace = {"decisions": [], "events": [], "context_snapshots": [], "trimming": [], "context_bytes": 0,
+             "context_budget": max(4096,min(48000,int(os.getenv("PRODUCT_CONTEXT_BUDGET","12000"))))}
     final = {"status": "incomplete"}
     reply = ""
     try:
@@ -190,6 +193,15 @@ def stream(body):
             updates = graph.stream(initial, {"recursion_limit": 30}, stream_mode="updates")
         for update in updates:
             for values in update.values():
+                additions = []
+                if values.get("decision") is not None:
+                    additions.append(event("decision", {"step":len(trace["decisions"]),
+                        "kind":values["decision"].kind}))
+                if "requirements" in values:
+                    additions.append(event("requirements", {"items":[r.model_dump() for r in values["requirements"]]}))
+                for entry in additions:
+                    trace["events"].append(entry)
+                    yield entry
                 reply = values.get("reply", reply)
                 for entry in values.get("events", []):
                     trace["events"].append(entry)

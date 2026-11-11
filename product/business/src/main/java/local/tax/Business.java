@@ -72,6 +72,13 @@ public class Business {
         return ResponseEntity.noContent().header(HttpHeaders.SET_COOKIE, cookie("", Duration.ZERO)).build();
     }
 
+    @GetMapping("/api/session")
+    ResponseEntity<Map<String,String>> session(@CookieValue(name=COOKIE,required=false) String token) {
+        Accounts.Identity actor=identity(token);
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore())
+                .body(Map.of("username",actor.username(),"tenant_id",actor.tenant()));
+    }
+
     @GetMapping("/api/enterprises")
     List<Map<String, Object>> enterprises(@CookieValue(name = COOKIE, required = false) String token) {
         Accounts.Identity identity = identity(token);
