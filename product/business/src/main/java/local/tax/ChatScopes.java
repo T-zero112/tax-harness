@@ -19,7 +19,11 @@ import org.springframework.web.server.ResponseStatusException;
 @Service
 public class ChatScopes {
     record Lease(String session, UUID scope_id, String tenant_id, String username,
-                 String enterprise_id, String period, long generation) {}
+                 String enterprise_id, String period, long generation, UUID task_id, UUID turn_id, boolean read_only) {
+        Lease forTurn(UUID task, UUID turn, boolean readOnly) {
+            return new Lease(session, scope_id, tenant_id, username, enterprise_id, period, generation, task, turn, readOnly);
+        }
+    }
     private final Business sessions;
     private final JdbcTemplate jdbc;
     private final StringRedisTemplate redis;
@@ -61,7 +65,7 @@ public class ChatScopes {
             scope = lock(scopeId);
         }
         return new Lease(session,scopeId,actor.tenant(),actor.username(),enterprise,period,
-                ((Number)scope.get("generation")).longValue());
+                ((Number)scope.get("generation")).longValue(), null, null, false);
     }
 
     String issue(Lease lease) throws Exception {
@@ -73,6 +77,10 @@ public class ChatScopes {
     void release(String token) { redis.delete("agent-call:" + token); }
 
     Lease resolve(String authorization, String token) throws Exception {
+        return resolve(authorization, token, true);
+    }
+
+    Lease resolve(String authorization, String token, boolean currentScope) throws Exception {
         String expected = "Bearer " + System.getenv("PRODUCT_AGENT_TOKEN");
         if (!MessageDigest.isEqual(authorization.getBytes(StandardCharsets.UTF_8),expected.getBytes(StandardCharsets.UTF_8)))
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED);
@@ -82,7 +90,7 @@ public class ChatScopes {
         Accounts.Identity actor = sessions.authorize(lease.session(),lease.enterprise_id(),Business.Access.READ);
         if (!actor.tenant().equals(lease.tenant_id()) || !actor.username().equals(lease.username()))
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED);
-        check(lease, false);
+        if (currentScope) check(lease, false);
         return lease;
     }
 
@@ -103,10 +111,12 @@ public class ChatScopes {
     }
 
     void checkProposal(UUID proposal, Accounts.Identity actor, String session) {
-        List<Map<String,Object>> bindings = jdbc.queryForList("select chat_scope_id,chat_generation from invoice_proposal "
+        List<Map<String,Object>> bindings = jdbc.queryForList("select chat_scope_id,chat_generation,task_id from invoice_proposal "
                 + "where proposal_id=? and tenant_id=? and chat_scope_id is not null",proposal,actor.tenant());
         if (bindings.isEmpty()) return;
         Map<String,Object> binding = bindings.getFirst();
+        if (binding.get("task_id")==null)
+            throw new ResponseStatusException(HttpStatus.CONFLICT,"legacy_chat_requires_review");
         Map<String,Object> scope = lock((UUID)binding.get("chat_scope_id"));
         if (!scope.get("account_id").equals(actor.id()) || !scope.get("browser_session").equals(sessionDigest(session)))
             throw new ResponseStatusException(HttpStatus.NOT_FOUND);

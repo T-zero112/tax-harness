@@ -28,16 +28,18 @@ public class Invoices {
     private final ObjectMapper json;
     private final Rules rules;
     private final ChatScopes chatScopes;
+    private final AgentOperations operations;
     private final TransactionTemplate transaction;
     private final HttpClient agent = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
 
     public Invoices(Business sessions, JdbcTemplate jdbc, ObjectMapper json, Rules rules,
-                    ChatScopes chatScopes, PlatformTransactionManager manager) {
+                    ChatScopes chatScopes, AgentOperations operations, PlatformTransactionManager manager) {
         this.sessions = sessions;
         this.jdbc = jdbc;
         this.json = json;
         this.rules = rules;
         this.chatScopes = chatScopes;
+        this.operations = operations;
         this.transaction = new TransactionTemplate(manager);
     }
 
@@ -45,7 +47,7 @@ public class Invoices {
                    LocalDate accounting_period, String amount_cents, String seller, String item_name) {}
     record Proposal(UUID proposal_id, long expected_revision, JsonNode changes, String rule_version, JsonNode rule_ref) {}
     record Receipt(UUID proposal_id, UUID idempotency_key, String actor, String rule_version,
-                   JsonNode before, JsonNode after, String saved_at, JsonNode rule_ref) {}
+                   JsonNode before, JsonNode after, String saved_at, JsonNode rule_ref, UUID operation_id) {}
 
     @GetMapping
     Invoice get(@CookieValue(name = Business.COOKIE, required = false) String token,
@@ -72,6 +74,11 @@ public class Invoices {
 
     JsonNode proposeForChat(String token, String enterpriseId, String invoiceId, JsonNode body,
                             ChatScopes.Lease lease) throws Exception {
+        return proposeForChat(token,enterpriseId,invoiceId,body,lease,null);
+    }
+
+    JsonNode proposeForChat(String token, String enterpriseId, String invoiceId, JsonNode body,
+                            ChatScopes.Lease lease, UUID operation) throws Exception {
         String tenant = sessions.authorize(token, enterpriseId, Business.Access.WRITE).tenant();
         Invoice current = invoice(tenant, enterpriseId, invoiceId, false);
         validateChanges(body);
@@ -88,31 +95,47 @@ public class Invoices {
         JsonNode reference = json.valueToTree(rule.citation());
         String version = rule.citation().code() + ":" + rule.citation().version();
         transaction.executeWithoutResult(status -> {
+            if (lease != null) operations.checkProposalTurn(lease);
             if (lease != null) chatScopes.check(lease, true);
             sessions.authorize(token, enterpriseId, Business.Access.WRITE);
             jdbc.update("""
                 insert into invoice_proposal (proposal_id, tenant_id, enterprise_id, invoice_id,
-                    expected_revision, changes, rule_version, rule_ref, chat_scope_id, chat_generation)
-                values (?, ?, ?, ?, ?, ?::jsonb, ?, ?::jsonb, ?, ?)
+                    expected_revision, changes, rule_version, rule_ref, chat_scope_id, chat_generation,before_record)
+                values (?, ?, ?, ?, ?, ?::jsonb, ?, ?::jsonb, ?, ?,?::jsonb)
                 """, id, tenant, enterpriseId, invoiceId, current.revision(), changes.toString(), version,
-                    reference.toString(), lease == null ? null : lease.scope_id(), lease == null ? null : lease.generation());
+                    reference.toString(), lease == null ? null : lease.scope_id(), lease == null ? null : lease.generation(),
+                    json.valueToTree(current).toString());
+            if (lease != null) operations.attachProposal(lease,operation,id);
         });
         return json.valueToTree(new Proposal(id, current.revision(), changes, version, reference));
     }
 
     @PostMapping("/proposals/{proposalId}/confirm")
-    @Transactional
     public Receipt confirm(@CookieValue(name = Business.COOKIE, required = false) String token,
                            @PathVariable String enterpriseId, @PathVariable String invoiceId,
                            @PathVariable UUID proposalId, @RequestHeader("Idempotency-Key") UUID key,
+                           @RequestHeader(name="X-Chat-Scope",required=false) UUID chatScope,
                            @RequestBody JsonNode body) throws Exception {
         Accounts.Identity actor = sessions.authorize(token, enterpriseId, Business.Access.WRITE);
-        String tenant = actor.tenant();
-        chatScopes.checkProposal(proposalId, actor, token);
         if (!body.isObject() || body.size() != 1 || !body.path("confirmed").isBoolean()
                 || !body.path("confirmed").booleanValue()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Explicit confirmation required");
         }
+        UUID operation=operations.prepareConfirmation(token,enterpriseId,invoiceId,proposalId,key,chatScope);
+        try {
+            return transaction.execute(status -> confirmTransaction(token,enterpriseId,invoiceId,proposalId,key,chatScope,actor,operation));
+        } catch (RuntimeException error) {
+            operations.failed(operation);
+            throw error;
+        }
+    }
+
+    private Receipt confirmTransaction(String token,String enterpriseId,String invoiceId,UUID proposalId,UUID key,
+                                       UUID chatScope,Accounts.Identity actor,UUID operation) {
+        String tenant=actor.tenant();
+        operations.lockConfirmation(operation,proposalId,chatScope);
+        chatScopes.checkProposal(proposalId,actor,token);
+        sessions.authorize(token,enterpriseId,Business.Access.WRITE);
         Invoice before = invoice(tenant, enterpriseId, invoiceId, true);
         Receipt previous = receipt(tenant, enterpriseId, invoiceId, key);
         if (previous != null) {
@@ -145,12 +168,14 @@ public class Invoices {
         }
         int inserted = jdbc.update("""
                 insert into invoice_audit (tenant_id, idempotency_key, enterprise_id, invoice_id,
-                    proposal_id, actor, rule_version, before_record, after_record, rule_ref)
-                values (?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?::jsonb) on conflict do nothing
+                    proposal_id, actor, rule_version, before_record, after_record, rule_ref,operation_id)
+                values (?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?::jsonb,?) on conflict do nothing
                 """, tenant, key, enterpriseId, invoiceId, proposalId, actor.username(), proposal.rule_version(),
-                json.valueToTree(before).toString(), json.valueToTree(after).toString(), proposal.rule_ref().toString());
+                json.valueToTree(before).toString(), json.valueToTree(after).toString(), proposal.rule_ref().toString(),operation);
         if (inserted != 1) throw conflict("Confirmation or idempotency key already used");
-        return receipt(tenant, enterpriseId, invoiceId, key);
+        Receipt result=receipt(tenant, enterpriseId, invoiceId, key);
+        operations.confirmed(operation,result);
+        return result;
     }
 
     @GetMapping("/audit")
@@ -170,7 +195,8 @@ public class Invoices {
     private Receipt auditRow(java.sql.ResultSet row) throws java.sql.SQLException {
         return new Receipt(row.getObject("proposal_id", UUID.class), row.getObject("idempotency_key", UUID.class),
                 row.getString("actor"), row.getString("rule_version"), parse(row.getString("before_record")),
-                parse(row.getString("after_record")), row.getString("saved_at"), parse(row.getString("rule_ref")));
+                parse(row.getString("after_record")), row.getString("saved_at"), parse(row.getString("rule_ref")),
+                row.getObject("operation_id",UUID.class));
     }
 
     private Invoice invoice(String tenant, String enterprise, String invoice, boolean lock) {

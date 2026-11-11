@@ -23,12 +23,18 @@ public class AgentChat {
     private final Rules rules;
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
+    private final AgentTasks tasks;
+    private final AgentOperations operations;
+    private final AgentRedaction redaction;
     private final HttpClient agent = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
 
     public AgentChat(Business sessions, ChatScopes scopes, Invoices invoices, Rules rules,
-                     JdbcTemplate jdbc, ObjectMapper json) {
+                     JdbcTemplate jdbc, ObjectMapper json, AgentTasks tasks, AgentOperations operations, AgentRedaction redaction) {
         this.sessions=sessions; this.scopes=scopes; this.invoices=invoices;
         this.rules=rules; this.jdbc=jdbc; this.json=json;
+        this.tasks=tasks;
+        this.operations=operations;
+        this.redaction=redaction;
     }
 
     record Turn(UUID session_id, String period, String message, UUID task_id) {}
@@ -47,12 +53,13 @@ public class AgentChat {
             @PathVariable String enterprise,@RequestBody Turn body) throws Exception {
         if (body.session_id()==null || body.message()==null || body.message().isBlank() || body.message().length()>4000)
             throw bad();
-        var lease=scopes.activate(cookie,body.session_id(),enterprise,body.period());
+        var lease=tasks.begin(cookie,enterprise,body.period(),body.task_id(),body.session_id(),body.message());
         String callToken=scopes.issue(lease);
-        var payload=Map.of("session_id",body.session_id(),"task_id",body.task_id()==null ? body.session_id():body.task_id(),
+        var renewal=tasks.renew(lease);
+        var payload=Map.of("session_id",body.session_id(),"task_id",lease.task_id(),"turn_id",lease.turn_id(),
                 "scope",Map.of("tenant_id",lease.tenant_id(),"username",lease.username(),"enterprise_id",enterprise,
                     "period",body.period(),"generation",lease.generation()),
-                "message",body.message(),"call_token",callToken,"enterprises",sessions.enterprises(cookie));
+                "message",redaction.text(body.message(),cookie,callToken),"call_token",callToken,"enterprises",sessions.enterprises(cookie));
         HttpResponse<InputStream> response;
         try {
             var request=HttpRequest.newBuilder(URI.create("http://agent:8000/internal/chat/turn"))
@@ -61,11 +68,17 @@ public class AgentChat {
                 .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(payload))).build();
             response=agent.send(request,HttpResponse.BodyHandlers.ofInputStream());
         } catch (Exception error) {
+            renewal.cancel(false);
+            tasks.abort(lease,"agent_unavailable");
+            tasks.release(lease);
             scopes.release(callToken);
             throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,"Agent unavailable");
         }
         if (response.statusCode()!=200) {
             response.body().close();
+            renewal.cancel(false);
+            tasks.abort(lease,"agent_rejected");
+            tasks.release(lease);
             scopes.release(callToken);
             throw new ResponseStatusException(response.statusCode()==503 ? HttpStatus.SERVICE_UNAVAILABLE:HttpStatus.BAD_GATEWAY,
                 response.statusCode()==503 ? "Model is not configured":"Agent unavailable");
@@ -75,7 +88,12 @@ public class AgentChat {
                 byte[] buffer=new byte[4096];
                 int size;
                 while ((size=input.read(buffer))!=-1) { output.write(buffer,0,size); output.flush(); }
-            } finally { scopes.release(callToken); }
+            } finally {
+                renewal.cancel(false);
+                tasks.abort(lease,"stream_interrupted");
+                tasks.release(lease);
+                scopes.release(callToken);
+            }
         };
         return ResponseEntity.ok().contentType(MediaType.TEXT_EVENT_STREAM).cacheControl(CacheControl.noCache()).body(stream);
     }
@@ -83,9 +101,16 @@ public class AgentChat {
     @PostMapping("/internal/agent/{tool}")
     Object tool(@RequestHeader(value="Authorization",defaultValue="") String authorization,
                 @PathVariable String tool,@RequestBody Tool request) throws Exception {
-        ChatScopes.Lease lease=scopes.resolve(authorization,request.call_token());
+        ChatScopes.Lease lease=scopes.resolve(authorization,request.call_token(),!tool.equals("trace"));
         JsonNode args=request.arguments();
         if (args==null || !args.isObject()) throw bad();
+        if (tool.equals("trace")) {
+            tasks.finish(lease,args,request.call_token());
+            tasks.release(lease);
+            return Map.of("status","succeeded","data",Map.of("stored",true));
+        }
+        tasks.checkTurn(lease,false);
+        if (tool.equals("context")) return Map.of("status","succeeded","data",tasks.context(lease));
         if (tool.equals("invalidate_scope")) {
             scopes.invalidate(lease);
             return Map.of("status","succeeded","data",Map.of("invalidated",true));
@@ -101,8 +126,7 @@ public class AgentChat {
             data=switch (tool) {
                 case "get_invoice" -> Map.of("record",current);
                 case "check_purpose" -> invoices.review(cookie,enterprise,invoice);
-                case "create_proposal" -> Map.of("proposal",invoices.proposeForChat(cookie,enterprise,invoice,
-                        args.path("changes"),lease),"before",current,"invoice_id",invoice);
+                case "create_proposal" -> createProposal(lease,invoice,args,current);
                 default -> operation(lease,invoice,args.path("proposal_id").asText());
             };
         } else if (tool.equals("search_rules")) {
@@ -144,17 +168,31 @@ public class AgentChat {
         result.put("data",data);
         result.put("error",null);
         result.put("object_id",invoice);
-        String operationId=tool.equals("create_proposal") ? json.valueToTree(data).path("proposal").path("proposal_id").asText(null)
-                : tool.equals("get_operation") ? args.path("proposal_id").asText(null) : null;
+        String operationId=tool.equals("create_proposal") ? json.valueToTree(data).path("operation_id").asText(null)
+                : tool.equals("get_operation") ? json.valueToTree(data).path("operation").path("operation_id").asText(null) : null;
         result.put("operation_id",operationId);
         result.put("scope",Map.of("enterprise_id",enterprise,"period",lease.period()));
         return result;
+    }
+
+    private Object createProposal(ChatScopes.Lease lease,String invoice,JsonNode args,Invoices.Invoice current) throws Exception {
+        UUID operation=operations.beginProposal(lease,invoice);
+        try {
+            JsonNode proposal=invoices.proposeForChat(lease.session(),lease.enterprise_id(),invoice,args.path("changes"),lease,operation);
+            if (proposal.path("status").asText().equals("manual_review")) operations.failed(operation);
+            return Map.of("proposal",proposal,"before",current,"invoice_id",invoice,"operation_id",operation);
+        } catch (Exception error) {
+            operations.failed(operation);
+            throw error;
+        }
     }
 
     private Object operation(ChatScopes.Lease lease,String invoice,String proposal) {
         UUID id;
         try { id=UUID.fromString(proposal); } catch (RuntimeException error) { throw bad(); }
         var rows=jdbc.queryForList("select p.proposal_id, p.expected_revision, p.changes, "
+                +"coalesce(a.operation_id,(select o.operation_id from agent_operation o where o.proposal_id=p.proposal_id "
+                +"and o.kind='proposal' order by o.created_at limit 1)) as operation_id, "
                 +"case when a.proposal_id is not null then 'confirmed' when p.chat_scope_id is not null and "
                 +"p.chat_generation<>s.generation then 'expired' else 'pending' end as state "
                 +"from invoice_proposal p left join invoice_audit a on p.proposal_id=a.proposal_id "
