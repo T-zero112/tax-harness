@@ -109,7 +109,7 @@ $env:SSL_CERT_FILE = (Resolve-Path product/tls/local/ca.crt).Path
 .venv/Scripts/python.exe product/verify_restore.py
 ```
 
-首次启动完成后，数据库应有 2 个租户、3 家企业、2 个账号、3 张发票、4 条银行流水、3 条规则，导入任务和发票审计均为 0。P5 的 Flyway 应到达 V7。规则验收前的模型预热应输出 `384`，空缓存需下载约 252 MB。测试会修改合成发票、规则和导入任务，恢复演练会生成本机备份。保留数据并停止验收服务时，使用 `docker compose -f product/compose.yaml -f product/compose.https.yaml stop`。
+首次启动完成后，数据库应有 2 个租户、3 家企业、2 个账号、3 张发票、4 条银行流水、3 条规则，导入任务和发票审计均为 0。当前 Flyway 应到达 V8。规则验收前的模型预热应输出 `384`，空缓存需下载约 252 MB。测试会修改合成发票、规则和导入任务，恢复演练会生成本机备份。保留数据并停止验收服务时，使用 `docker compose -f product/compose.yaml -f product/compose.https.yaml stop`。
 
 交付源码由 Git 标签导出，复验结果见 [交付归档验收](P4验收记录.md#产品版-v010-交付归档)。源码包的 SHA-256 和对应提交号随包提供。
 
@@ -132,7 +132,7 @@ Java 新增 `POST /api/enterprises/{enterprise}/chat` 和 `POST .../chat/scope`�
 
 V7 补充发票金额、销售方和项目名，并记录对话范围及提案绑定。金额在 PostgreSQL 存 bigint 整数分，接口用十进制整数字符串传递，避免 JavaScript 大整数失真。原四列 Excel 表头仍可用，也可在四列后按顺序追加 `amount_cents`、`seller`、`item_name`。金额为空会保留未知值，汇总时明确拒绝宣称金额完整。
 
-LangGraph 每轮最多 6 次模型决策。需求清单首次登记后固定，答案只能引用本轮成功工具证据，金额与规则正文由程序渲染。当前对话的历史、用户已提供的目标票号和提案指针保存在内存，最多 256 个会话，空闲 1 小时释放。Agent 重启后这些对话信息需要重新提供。正式任务检查点、长期偏好与持久轨迹安排在后续阶段。
+LangGraph 每轮最多 6 次模型决策。需求清单首次登记后固定，答案只能引用本轮成功工具证据，金额与规则正文由程序渲染。P6 已将任务、消息、偏好与轨迹迁入 Java 管理的 PostgreSQL；Agent 每轮重新取上下文，恢复过程见下文。
 
 ### P5 独立验收
 
@@ -170,3 +170,62 @@ docker compose -f product/compose.yaml -f product/compose.https.yaml -f product/
 真实模型在另一套初始数据上执行 `python product/verify_agent.py --live`。该副本的 `.env` 必须配置实际模型，Agent 容器还需设置 `PRODUCT_AGENT_EVIDENCE_DIR=/embedding-cache/p5-live-evidence` 以留存脱敏原始响应。脚本核对容器模型名称，逐项输出通过或失败，失败以非零退出码结束。结果和原始响应保存在副本的 `data/agent-live-时间/`。详见 [P5 验收记录](P5验收记录.md)。
 
 独立替身实例需要手工验证前端时，可额外叠加 `compose.agent-ui.yaml`。该覆盖文件为演示 HTTP 测试关闭 Secure Cookie，并仅将前端绑定在回环端口 13108；本轮浏览器点击验收仍标为待验证。产品的正常 HTTPS 启动命令使用基础配置与 HTTPS 配置。
+
+## P6 任务、记忆与上下文持久化
+
+任务、用户/助手消息、逐轮轨迹、偏好、偏好失效记录和审计均由 Java 写 PostgreSQL。V8 新增 `agent_task`、`agent_message`、`agent_trace`、`agent_memory`、`agent_memory_invalidation`、`agent_memory_audit`、`agent_operation` 七张表；恢复演练现覆盖 21 张表。Agent 不直连数据库，Redis 只协调短期并发锁。
+
+每账号、每租户、每企业最多一个未结束任务。刷新页面后读取 active 接口，带出原追问或建议卡。跨会话的建议卡须点击“恢复当前任务”，核对内容后再点击“确认保存”。确认请求携带 `X-Chat-Scope` 和稳定的 `Idempotency-Key`；重放返回同一操作编号。提案保存生成时的原值快照，恢复时不会用已变化的当前记录冒充原值。V7 旧会话不迁移，旧对话提案需要重新核验；原有非对话提案流程保留。
+
+同企业切换月份时，只允许新月份查询，原任务的目标、追问、提案、状态和 revision 保留。未知操作必须先核实，不能直接更正目标、取消任务或冲突写入。任务业务状态与单轮轨迹状态分开：一次查询 succeeded 可以与原任务 waiting_user 同时存在。
+
+新接口（`...` 表示 `/api/enterprises/{enterprise}/chat`）：
+
+| 方法及路径 | 参数及约束 |
+| --- | --- |
+| `GET .../tasks/active?period=YYYY-MM` | 返回 task、matches_period、最近消息、proposal、unfinished_operations、requires_resume |
+| `GET .../tasks/{id}?period=YYYY-MM` | 只读本人任务，越权 404 |
+| `GET .../tasks/{id}/traces` | 脱敏决策、工具证据、模型输入、裁剪与最终状态 |
+| `POST .../tasks/{id}/correct` | expected_revision；可更正 object_id 或 question，旧提案失效 |
+| `POST .../tasks/{id}/cancel` | expected_revision；忙碌、未知操作或版本冲突 409 |
+| `POST .../tasks/{id}/resume` | session_id、period、expected_revision；显式重绑建议卡 |
+| `POST .../tasks/{id}/operations/{operation}/reconcile` | 锁定任务及发票，按审计和提案事实核实，不能凭模型判断 |
+| `GET/POST .../memories` | 新建需本人、本企业用户消息 source_message_id；可选 user_wide |
+| `POST .../memories/{id}/correct` | content、expected_revision；可提供新的 source_message_id |
+| `DELETE .../memories/{id}` | JSON body 中 expected_revision |
+| `GET .../memories/{id}/audit` | 包括已删除偏好的版本审计，仅本人可读 |
+
+`POST /internal/agent/context` 和 `POST /internal/agent/trace` 仍需服务凭据与本轮调用令牌。上下文保留范围、本轮输入、任务状态和本轮证据，超预算先裁历史，再裁偏好，逐项记轨迹；强制内容仍超限则 `context_budget_exceeded`。历史最多八条，偏好更正/删除后排除旧来源及同轮助手回声。偏好置于独立数据字段，不能授予工具权限或替代业务证据。
+
+并发使用 30 秒 Redis 所有者锁，每 8 秒续租，同时记录 PostgreSQL active_turn_id/lease_until；后续写入再次核对 turn 和租约。释放使用 Lua 比较所有者后删除。数据库锁顺序为任务→范围→发票，长模型调用在事务外。Java 中断时落 incomplete；Java 进程异常退出的遗留轮次在租约过期后由后续请求核实恢复。
+
+### P6 独立验收
+
+在单独源码副本运行，首次先用 `start.ps1 -Https` 生成该副本凭据、CA 和初始化数据，并按前文准备离线向量模型文件。下面脚本会重建 Agent 配置并在独立实例强制终止 Agent，必须使用以 `tax-product-p6` 开头的独立项目名。基础 P5 验收依赖初始三张发票，先执行它，再执行导入及 P6 用例。
+
+```powershell
+$env:COMPOSE_PROJECT_NAME = 'tax-product-p6'
+$env:PRODUCT_IMPORTER_IMAGE = 'tax-product-p6-importer'
+$env:PRODUCT_HTTP_PORT = '13109'
+$env:PRODUCT_HTTPS_PORT = '13448'
+powershell -ExecutionPolicy Bypass -File product/start.ps1 -Https
+$env:PRODUCT_TEST_BASE = 'https://127.0.0.1:13448'
+$env:SSL_CERT_FILE = (Resolve-Path product/tls/local/ca.crt).Path
+$files = @('-f','product/compose.yaml','-f','product/compose.https.yaml',
+  '-f','product/compose.agent-test.yaml','-f','product/compose.memory-test.yaml')
+docker compose @files up -d --build --wait
+python product/verify_agent.py
+python product/verify_memory.py
+python product/verify_https.py
+python product/verify_access.py
+python product/verify.py
+python product/verify.py --p3
+python product/verify_import.py
+python product/verify_bank.py
+python product/verify_agent.py --details
+python product/verify_restore.py
+```
+
+结果及脱敏轨迹写入副本的 `data/agent-memory-时间/`。模型替身会真实接收请求，脚本将其捕获内容与已持久化轨迹对照。未知写入场景用隔离数据库故障注入构造，核实和拦截走真实 Java API；不作为真实网络故障提交的证明。备份恢复演练会独立启动数据库和对象存储，核对所有表内容与原件 SHA-256。
+
+`verify_memory.py --snapshot` 只读导出六张既有业务表，排除 V8 新增列，用于 V7→V8 前后比较。实际升级前先保存数据库和原件备份并验证可恢复，升级后再比较快照。详细结果、证据目录和限制见 [P6 验收记录](P6验收记录.md)。本轮 P6 使用替身验证程序行为；P6 真实 Qwen3 8B 测试和浏览器实际点击确认另行记录，不将替身结果算作真实模型通过。
