@@ -1,5 +1,6 @@
 """Current-turn evidence and proposal validation, adapted from the competition guards."""
 import re
+from copy import deepcopy
 import unicodedata
 from types import SimpleNamespace
 from decimal import Decimal
@@ -54,7 +55,7 @@ def scope_conflict(text, scope, enterprises):
 def safe_reply(text, evidence):
     reads = []
     for item in evidence:
-        data = dict(item["result"].get("data") or {})
+        data = deepcopy(item["result"].get("data") or {})
         data.update(data.get("summary", {}))
         for key in ("invoice_cents", "income_cents", "expense_cents"):
             if key in data:

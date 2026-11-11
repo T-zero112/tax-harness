@@ -1,0 +1,4 @@
+services:
+  agent:
+    environment:
+      PRODUCT_CONTEXT_BUDGET: "4096"

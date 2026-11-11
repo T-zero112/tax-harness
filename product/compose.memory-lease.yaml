@@ -1,0 +1,4 @@
+services:
+  agent:
+    environment:
+      PRODUCT_MODEL_TIMEOUT: "60"

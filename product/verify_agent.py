@@ -169,7 +169,7 @@ def verify():
     data=next(e["data"] for e in result if e["event"]=="proposal")
     target="/api/enterprises/C001/invoices/F001"
     before=json.loads(request(alpha,target))
-    key={"Idempotency-Key":str(uuid4())}
+    key={"Idempotency-Key":str(uuid4()),"X-Chat-Scope":session}
     path=target+"/proposals/"+data["proposal"]["proposal_id"]+"/confirm"
     first=json.loads(request(alpha,path,{"confirmed":True},headers=key))
     second=json.loads(request(alpha,path,{"confirmed":True},headers=key))
@@ -186,7 +186,7 @@ def verify():
     result=turn(alpha,"改为 C002 企业",session)
     check(has(result,"error","scope_conflict") and not has(result,"tool_call"),"scope conflict before model or business tool")
     request(alpha,target+"/proposals/"+pending["proposal"]["proposal_id"]+"/confirm",{"confirmed":True},
-            expected=409,headers={"Idempotency-Key":str(uuid4())})
+            expected=409,headers={"Idempotency-Key":str(uuid4()),"X-Chat-Scope":session})
     print("PASS old pending proposal rejected by Java after scope conflict",flush=True)
     # No identity or scope parameters accepted from a browser-generated history.
     request(alpha,"/api/enterprises/C001/chat",{"session_id":str(uuid4()),"period":"bad","message":"查发票"},expected=400)
@@ -203,6 +203,10 @@ print('PASS internal credential alone cannot impersonate a user')
     config=dict(line.split("=",1) for line in (ROOT/".env").read_text().splitlines() if "=" in line and not line.startswith("#"))
     secrets=[v for k,v in config.items() if len(v)>=12 and any(x in k for x in ("TOKEN","PASSWORD","API_KEY"))]
     check(not any(secret in logs for secret in secrets+["p5-test-only-model-key"]),"credentials absent from service logs")
+    active=json.loads(request(alpha,"/api/enterprises/C001/chat/tasks/active?period=2026-09"))
+    if active.get("task"):
+        request(alpha,"/api/enterprises/C001/chat/tasks/"+active["task"]["task_id"]+"/cancel",
+                {"expected_revision":active["task"]["revision"]})
     print("P5_SCRIPTED_VERIFICATION_PASSED",flush=True)
 
 
@@ -299,7 +303,7 @@ def live():
                 beta=login("beta")
                 other_tenant=json.loads(request(beta,target))
                 path=target+"/proposals/"+data["proposal"]["proposal_id"]+"/confirm"
-                key={"Idempotency-Key":str(uuid4())}
+                key={"Idempotency-Key":str(uuid4()),"X-Chat-Scope":session}
                 receipt=json.loads(request(alpha,path,{"confirmed":True},headers=key))
                 replay=json.loads(request(alpha,path,{"confirmed":True},headers=key))
                 after=json.loads(request(alpha,target))

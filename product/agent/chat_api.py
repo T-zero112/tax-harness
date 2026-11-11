@@ -26,6 +26,7 @@ class Scope(StrictModel):
 class Turn(StrictModel):
     session_id: UUID
     task_id: UUID
+    turn_id: UUID
     scope: Scope
     message: str = Field(min_length=1, max_length=4000)
     call_token: str

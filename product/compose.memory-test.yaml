@@ -1,0 +1,8 @@
+services:
+  model-stub:
+    command: ["python", "/tests/verify_memory.py", "--serve"]
+    volumes:
+      - ./verify_memory.py:/tests/verify_memory.py:ro
+  business:
+    environment:
+      PRODUCT_MODEL_API_KEY: p5-test-only-model-key

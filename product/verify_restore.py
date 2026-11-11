@@ -18,6 +18,8 @@ TABLES = (
     "product_account", "tenant_membership", "enterprise_grant",
     "product_bank_transaction",
     "agent_chat_scope",
+    "agent_task", "agent_message", "agent_trace", "agent_memory", "agent_memory_invalidation",
+    "agent_memory_audit", "agent_operation",
 )
 S3 = """
 import json, os, sys

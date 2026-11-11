@@ -1,5 +1,6 @@
 """Bounded LangGraph decision loop with a Java-only business gateway."""
 import json
+import os
 import re
 import time
 from typing import TypedDict
@@ -42,12 +43,19 @@ def decide(state):
                                               event("done", {"status": "incomplete"})]}
     try:
         decision = model_adapter.decide(context.messages(state["scope"], state["body"]["message"],
-            state["memory"], state["evidence"], state["feedback"], state["requirements"]))
+            state["memory"], state["evidence"], state["feedback"], state["requirements"], state["memory"]["trace"]))
+        state["memory"]["trace"]["decisions"].append(decision.model_dump())
         return {"decision": decision, "steps": state["steps"] + 1, "route": "validate", "events": []}
-    except (ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError) as error:
+        if str(error) == "context_budget_exceeded":
+            return {"route": "finish", "events": [event("error", {"code": "context_budget_exceeded",
+                    "message": "当前任务与证据超出上下文预算，请缩小问题。待办已保留。"}),
+                    event("done", {"status": "incomplete"})]}
+        state["memory"]["trace"]["decisions"].append({"kind": "invalid", "code": "invalid_model_response"})
         return {"steps": state["steps"] + 1, "route": "decide", "feedback": "invalid_model_response",
                 "events": [event("status", {"code": "invalid_model_response", "message": "模型决策无效，正在重试。"})]}
     except httpx.HTTPError:
+        state["memory"]["trace"]["decisions"].append({"kind": "invalid", "code": "model_unavailable"})
         return {"route": "finish", "events": [event("error", {"code": "model_unavailable", "message": "模型请求失败或超时，待办已保留。"}),
                                               event("done", {"status": "incomplete"})]}
 
@@ -156,47 +164,58 @@ for node in ("decide", "validate", "execute"):
 graph = builder.compile()
 
 
+
 def stream(body):
     scope = body["scope"]
-    key = (scope["tenant_id"], scope["username"], body["session_id"])
+    started = time.monotonic()
+    trace = {"decisions": [], "events": [], "context_snapshots": [], "trimming": [], "context_bytes": 0}
+    final = {"status": "incomplete"}
+    reply = ""
     try:
-        memory = context.acquire(key)
-    except ValueError:
-        yield event("error", {"code": "conversation_busy", "message": "会话繁忙，请稍后重试。"})
-        yield event("done", {"status": "incomplete"})
-        return
-    try:
-        signature = (scope["enterprise_id"], scope["period"], scope["generation"])
-        if memory.get("scope") != signature:
-            memory["history"], memory["pending"] = [], None
-            memory["scope"] = signature
-            memory.pop("proposal", None)
-            memory["pending_messages"] = []
+        memory = context.load(body["call_token"])
+        memory["trace"] = trace
+        yield event("status", {"message": "已读取持久化任务与有效偏好，正在核对资料。",
+                              "task_id": body["task_id"], "turn_id": body["turn_id"],
+                              "message_id": memory.get("message_id")})
         if guards.scope_conflict(body["message"], scope, body["enterprises"]):
             tools.invoke("invalidate_scope", {}, body["call_token"])
-            memory["pending"] = None
-            yield event("error", {"code": "scope_conflict", "message": "消息中的企业与当前范围不同，请先切换企业。原未确认提案已失效。"})
-            yield event("done", {"status": "needs_input"})
-            return
-        pending = guards.target(body["message"], memory["pending"])
-        if pending != memory["pending"]:
-            memory["pending_messages"] = []
-            memory.pop("proposal", None)
-        memory["pending"] = pending
-        memory["pending_messages"] = (memory.get("pending_messages", []) + [body["message"]])[-8:]
-        initial = {"body": body, "scope": scope, "memory": memory, "steps": 0, "evidence": [],
-                   "requirements": guards.required_by_text(body["message"]), "registered": False,
-                   "feedback": "", "events": [], "started": time.monotonic()}
-        yield event("status", {"message": "正在核对当前企业和期间的资料。"})
-        reply = ""
-        for update in graph.stream(initial, {"recursion_limit": 30}, stream_mode="updates"):
+            entries = [event("error", {"code": "scope_conflict",
+                "message": "消息中的企业与当前范围不同，请先切换企业。原未确认提案已失效。"}),
+                       event("done", {"status": "needs_input"})]
+            updates = [{"scope_guard": {"events": entries}}]
+        else:
+            initial = {"body": body, "scope": scope, "memory": memory, "steps": 0, "evidence": [],
+                       "requirements": guards.required_by_text(body["message"]), "registered": False,
+                       "feedback": "", "events": [], "started": started}
+            updates = graph.stream(initial, {"recursion_limit": 30}, stream_mode="updates")
+        for update in updates:
             for values in update.values():
-                for entry in values.get("events", []):
-                    yield entry
                 reply = values.get("reply", reply)
-        memory["history"] = (memory["history"] + [{"user": body["message"], "assistant": reply}])[-8:]
+                for entry in values.get("events", []):
+                    trace["events"].append(entry)
+                    if entry["event"] == "proposal":
+                        reply = "发票 " + entry["data"]["invoice_id"] + " 的提案待确认，请核对后点击确认保存。"
+                    if entry["event"] == "error" and not reply:
+                        reply = entry["data"].get("message", "本轮未完成，待办已保留。")
+                    if entry["event"] == "done":
+                        final = entry["data"]
+                    else:
+                        yield entry
     except Exception:
-        yield event("error", {"code": "turn_failed", "message": "本轮未完成，业务结果需重新查询核实。"})
-        yield event("done", {"status": "incomplete"})
-    finally:
-        memory["lock"].release()
+        entry = event("error", {"code": "turn_failed", "message": "本轮未完成，待办与业务结果请重新核实。"})
+        trace["events"].append(entry)
+        yield entry
+    trace.update(status=final["status"], reply=reply, steps=len(trace["decisions"]),
+                 model_name=os.getenv("PRODUCT_MODEL_NAME", ""),
+                 duration_ms=int((time.monotonic() - started) * 1000),
+                 guard_codes=[e["data"]["code"] for e in trace["events"]
+                              if e["event"] in ("status", "error") and "code" in e["data"]])
+    try:
+        result = tools.invoke("trace", trace, body["call_token"])
+        if result["status"] != "succeeded":
+            final = {"status": "incomplete"}
+            yield event("error", {"code": "trace_unavailable", "message": "本轮轨迹未确认，请恢复任务核实。"})
+    except Exception:
+        final = {"status": "incomplete"}
+        yield event("error", {"code": "trace_unavailable", "message": "本轮连接中断，任务可恢复后核实。"})
+    yield event("done", {**final, "task_id": body["task_id"], "turn_id": body["turn_id"]})
