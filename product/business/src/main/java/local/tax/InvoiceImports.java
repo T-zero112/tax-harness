@@ -146,11 +146,14 @@ public class InvoiceImports {
         ordered.sort(Comparator.comparing(row -> row.path("invoice_id").asText()));
         for (JsonNode row : ordered) {
             int count = jdbc.update("""
-                    insert into product_invoice (tenant_id, enterprise_id, invoice_id, accounting_period, purpose, note)
-                    values (?, ?, ?, ?, ?, ?) on conflict do nothing
+                    insert into product_invoice (tenant_id, enterprise_id, invoice_id, accounting_period, purpose, note,
+                        amount_cents,seller,item_name)
+                    values (?, ?, ?, ?, ?, ?, ?, ?, ?) on conflict do nothing
                     """, tenant, enterpriseId, row.path("invoice_id").asText(),
                     YearMonth.parse(row.path("accounting_period").asText()).atDay(1),
-                    row.path("purpose").asText(null), row.path("note").asText(null));
+                    row.path("purpose").asText(null), row.path("note").asText(null),
+                    row.hasNonNull("amount_cents") ? Long.valueOf(row.path("amount_cents").asText()) : null,
+                    row.path("seller").asText(null),row.path("item_name").asText(null));
             if (count != 1) throw conflict("Invoice already exists");
         }
         jdbc.update("""
@@ -163,6 +166,12 @@ public class InvoiceImports {
     private void validateRows(JsonNode rows) {
         Set<String> invoices = new HashSet<>();
         for (JsonNode row : rows) {
+            if (row.hasNonNull("amount_cents") && (!row.get("amount_cents").isTextual()
+                    || !row.get("amount_cents").asText().matches("[0-9]{1,18}"))) throw bad("Invalid amount");
+            for (String name : List.of("seller","item_name")) {
+                if (row.hasNonNull(name) && (!row.get(name).isTextual() || row.get(name).asText().length()>120
+                        || row.get(name).asText().indexOf(0)>=0)) throw bad("Invalid invoice detail");
+            }
             String invoice = row.path("invoice_id").asText("");
             String period = row.path("accounting_period").asText("");
             if (!row.path("invoice_id").isTextual() || !invoice.matches("[A-Za-z0-9_-]{1,64}")

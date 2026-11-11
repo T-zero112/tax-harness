@@ -14,6 +14,8 @@ import java.util.UUID;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -25,16 +27,22 @@ public class Invoices {
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
     private final Rules rules;
+    private final ChatScopes chatScopes;
+    private final TransactionTemplate transaction;
     private final HttpClient agent = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
 
-    public Invoices(Business sessions, JdbcTemplate jdbc, ObjectMapper json, Rules rules) {
+    public Invoices(Business sessions, JdbcTemplate jdbc, ObjectMapper json, Rules rules,
+                    ChatScopes chatScopes, PlatformTransactionManager manager) {
         this.sessions = sessions;
         this.jdbc = jdbc;
         this.json = json;
         this.rules = rules;
+        this.chatScopes = chatScopes;
+        this.transaction = new TransactionTemplate(manager);
     }
 
-    record Invoice(String enterprise_id, String invoice_id, String purpose, String note, long revision, LocalDate accounting_period) {}
+    record Invoice(String enterprise_id, String invoice_id, String purpose, String note, long revision,
+                   LocalDate accounting_period, String amount_cents, String seller, String item_name) {}
     record Proposal(UUID proposal_id, long expected_revision, JsonNode changes, String rule_version, JsonNode rule_ref) {}
     record Receipt(UUID proposal_id, UUID idempotency_key, String actor, String rule_version,
                    JsonNode before, JsonNode after, String saved_at, JsonNode rule_ref) {}
@@ -59,6 +67,11 @@ public class Invoices {
     JsonNode propose(@CookieValue(name = Business.COOKIE, required = false) String token,
                      @PathVariable String enterpriseId, @PathVariable String invoiceId,
                      @RequestBody JsonNode body) throws Exception {
+        return proposeForChat(token, enterpriseId, invoiceId, body, null);
+    }
+
+    JsonNode proposeForChat(String token, String enterpriseId, String invoiceId, JsonNode body,
+                            ChatScopes.Lease lease) throws Exception {
         String tenant = sessions.authorize(token, enterpriseId, Business.Access.WRITE).tenant();
         Invoice current = invoice(tenant, enterpriseId, invoiceId, false);
         validateChanges(body);
@@ -74,10 +87,16 @@ public class Invoices {
         UUID id = UUID.randomUUID();
         JsonNode reference = json.valueToTree(rule.citation());
         String version = rule.citation().code() + ":" + rule.citation().version();
-        jdbc.update("""
+        transaction.executeWithoutResult(status -> {
+            if (lease != null) chatScopes.check(lease, true);
+            sessions.authorize(token, enterpriseId, Business.Access.WRITE);
+            jdbc.update("""
                 insert into invoice_proposal (proposal_id, tenant_id, enterprise_id, invoice_id,
-                    expected_revision, changes, rule_version, rule_ref) values (?, ?, ?, ?, ?, ?::jsonb, ?, ?::jsonb)
-                """, id, tenant, enterpriseId, invoiceId, current.revision(), changes.toString(), version, reference.toString());
+                    expected_revision, changes, rule_version, rule_ref, chat_scope_id, chat_generation)
+                values (?, ?, ?, ?, ?, ?::jsonb, ?, ?::jsonb, ?, ?)
+                """, id, tenant, enterpriseId, invoiceId, current.revision(), changes.toString(), version,
+                    reference.toString(), lease == null ? null : lease.scope_id(), lease == null ? null : lease.generation());
+        });
         return json.valueToTree(new Proposal(id, current.revision(), changes, version, reference));
     }
 
@@ -89,6 +108,7 @@ public class Invoices {
                            @RequestBody JsonNode body) throws Exception {
         Accounts.Identity actor = sessions.authorize(token, enterpriseId, Business.Access.WRITE);
         String tenant = actor.tenant();
+        chatScopes.checkProposal(proposalId, actor, token);
         if (!body.isObject() || body.size() != 1 || !body.path("confirmed").isBoolean()
                 || !body.path("confirmed").booleanValue()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Explicit confirmation required");
@@ -157,7 +177,8 @@ public class Invoices {
         return jdbc.query("select * from product_invoice where " + SCOPE + (lock ? " for update" : ""),
                 (row, index) -> new Invoice(row.getString("enterprise_id"), row.getString("invoice_id"),
                         row.getString("purpose"), row.getString("note"), row.getLong("revision"),
-                        row.getObject("accounting_period", LocalDate.class)),
+                        row.getObject("accounting_period", LocalDate.class), row.getString("amount_cents"),
+                        row.getString("seller"), row.getString("item_name")),
                 tenant, enterprise, invoice).stream().findFirst()
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
     }

@@ -20,6 +20,7 @@ from pydantic import BaseModel
 MAX_BYTES = 2 * 1024 * 1024
 MAX_ROWS = 1000
 HEADERS = ("invoice_id", "accounting_period", "purpose", "note")
+DETAIL_HEADERS = HEADERS + ("amount_cents", "seller", "item_name")
 BUCKET = "invoice-imports"
 TOKEN = os.environ["IMPORT_TOKEN"]
 KEY = re.compile(r"[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[0-9a-f]{64}\.xlsx")
@@ -112,7 +113,7 @@ def parse_xlsx(raw):
                 continue
             with archive.open(entry) as xml:
                 for _, element in ElementTree.iterparse(xml, events=("end",)):
-                    if element.tag.endswith("}c") and not re.fullmatch(r"[A-D][1-9][0-9]{0,3}", element.get("r", "")):
+                    if element.tag.endswith("}c") and not re.fullmatch(r"[A-G][1-9][0-9]{0,3}", element.get("r", "")):
                         raise ValueError("工作表超出规定列范围")
                     element.clear()
     workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=False, keep_links=False)
@@ -121,10 +122,12 @@ def parse_xlsx(raw):
             raise ValueError("请提供仅含一个工作表的 Excel 文件")
         sheet = workbook.worksheets[0]
         sheet.reset_dimensions()
-        records = sheet.iter_rows(max_col=5)
+        records = sheet.iter_rows(max_col=8)
         header = next(records, ())
-        if tuple(cell.value for cell in header[:4]) != HEADERS or any(cell.value is not None for cell in header[4:]):
-            raise ValueError("表头须为 invoice_id、accounting_period、purpose、note")
+        detail = tuple(cell.value for cell in header[:7]) == DETAIL_HEADERS
+        legacy = tuple(cell.value for cell in header[:4]) == HEADERS and all(cell.value is None for cell in header[4:])
+        if not (detail or legacy) or header[7].value is not None:
+            raise ValueError("表头须为四列基础字段，或追加 amount_cents、seller、item_name")
         seen = set()
         rows, errors = [], []
         for number, cells in enumerate(records, start=2):
@@ -133,9 +136,9 @@ def parse_xlsx(raw):
             if all(cell.value is None for cell in cells):
                 continue
             values = [cell.value.strip() if isinstance(cell.value, str) else cell.value for cell in cells]
-            invoice, period, purpose, note, extra = values
+            invoice, period, purpose, note, amount, seller, item, extra = values
             message = None
-            if extra is not None or any(cell.data_type in {"f", "e"} for cell in cells):
+            if extra is not None or (legacy and any(v is not None for v in values[4:])) or any(cell.data_type in {"f", "e"} for cell in cells):
                 message = "包含额外字段、公式或 Excel 错误值"
             elif not isinstance(invoice, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", invoice):
                 message = "发票编号须为 1 至 64 位字母、数字、下划线或短横线"
@@ -146,11 +149,18 @@ def parse_xlsx(raw):
                 message = "用途和备注须为不超过 500 字的文本"
             elif invoice in seen:
                 message = "文件中发票编号重复"
+            elif amount is not None and (isinstance(amount, bool) or not re.fullmatch(r"[0-9]{1,18}", str(amount))):
+                message = "金额须为非负整数分，最多 18 位"
+            elif any(v is not None and (not isinstance(v, str) or len(v) > 120 or "\x00" in v) for v in (seller, item)):
+                message = "销售方和项目名须为不超过 120 字的文本"
             if message:
                 errors.append({"row": number, "message": message})
             else:
                 rows.append({"row": number, "invoice_id": invoice, "accounting_period": period,
                              "purpose": purpose or None, "note": note or None})
+                if detail:
+                    rows[-1].update(amount_cents=str(int(amount)) if amount is not None else None,
+                                    seller=seller or None, item_name=item or None)
             if isinstance(invoice, str):
                 seen.add(invoice)
         if not rows and not errors:

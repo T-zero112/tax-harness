@@ -17,6 +17,7 @@ TABLES = (
     "invoice_import", "invoice_proposal", "invoice_audit", "flyway_schema_history",
     "product_account", "tenant_membership", "enterprise_grant",
     "product_bank_transaction",
+    "agent_chat_scope",
 )
 S3 = """
 import json, os, sys
