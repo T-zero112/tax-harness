@@ -109,6 +109,64 @@ $env:SSL_CERT_FILE = (Resolve-Path product/tls/local/ca.crt).Path
 .venv/Scripts/python.exe product/verify_restore.py
 ```
 
-首次启动完成后，数据库应有 2 个租户、3 家企业、2 个账号、3 张发票、4 条银行流水、3 条规则，导入任务和发票审计均为 0。Flyway 应到达 V6。规则验收前的模型预热应输出 `384`，空缓存需下载约 252 MB。测试会修改合成发票、规则和导入任务，恢复演练会生成本机备份。保留数据并停止验收服务时，使用 `docker compose -f product/compose.yaml -f product/compose.https.yaml stop`。
+首次启动完成后，数据库应有 2 个租户、3 家企业、2 个账号、3 张发票、4 条银行流水、3 条规则，导入任务和发票审计均为 0。P5 的 Flyway 应到达 V7。规则验收前的模型预热应输出 `384`，空缓存需下载约 252 MB。测试会修改合成发票、规则和导入任务，恢复演练会生成本机备份。保留数据并停止验收服务时，使用 `docker compose -f product/compose.yaml -f product/compose.https.yaml stop`。
 
 交付源码由 Git 标签导出，复验结果见 [交付归档验收](P4验收记录.md#产品版-v010-交付归档)。源码包的 SHA-256 和对应提交号随包提供。
+
+## P5 对话 Agent
+
+在本机 `product/.env` 配置模型，随后运行 `powershell -ExecutionPolicy Bypass -File product/start.ps1 -Https`。模型接口使用 OpenAI 兼容 Chat Completions，BASE_URL 填写到 `/v1`。本机 Ollama 示例配置如下，API Key 按实际服务要求填写。
+
+```dotenv
+PRODUCT_MODEL_BASE_URL=http://host.docker.internal:11434/v1
+PRODUCT_MODEL_NAME=qwen3:8b
+PRODUCT_MODEL_API_KEY=
+PRODUCT_MODEL_STRUCTURED=schema
+PRODUCT_MODEL_TIMEOUT=120
+PRODUCT_CONTEXT_BUDGET=12000
+```
+
+`PRODUCT_MODEL_STRUCTURED` 可为 `schema` 或 `none`，默认 `none`。未提供模型地址或名称时，对话接口返回 503，其他工作台功能可继续使用。登录后在「对话」中选企业和月份，输入查询或补全要求。建议卡展示票号、原值、新值及规则条款，用户点击「确认保存」后由 Java 写入并独立回查。保存请求重试复用原幂等键。
+
+Java 新增 `POST /api/enterprises/{enterprise}/chat` 和 `POST .../chat/scope`。对话经 HTTPS 返回 `status`、`tool_call`、`tool_result`、`proposal`、`answer`、`error`、`done` SSE 事件，长请求每 10 秒发送心跳。内部 `POST /internal/agent/{tool}` 只接受服务凭据与 Java 签发的 15 分钟调用令牌。令牌绑定登录会话、企业、月份和范围版本。工具包括发票与流水查询、规则检索、用途核验、提案生成和操作状态查询。模型工具清单中的所有操作都通过 Java 执行。
+
+V7 补充发票金额、销售方和项目名，并记录对话范围及提案绑定。金额在 PostgreSQL 存 bigint 整数分，接口用十进制整数字符串传递，避免 JavaScript 大整数失真。原四列 Excel 表头仍可用，也可在四列后按顺序追加 `amount_cents`、`seller`、`item_name`。金额为空会保留未知值，汇总时明确拒绝宣称金额完整。
+
+LangGraph 每轮最多 6 次模型决策。需求清单首次登记后固定，答案只能引用本轮成功工具证据，金额与规则正文由程序渲染。当前对话的历史、用户已提供的目标票号和提案指针保存在内存，最多 256 个会话，空闲 1 小时释放。Agent 重启后这些对话信息需要重新提供。正式任务检查点、长期偏好与持久轨迹安排在后续阶段。
+
+### P5 独立验收
+
+验收会写入合成数据。请在独立源码副本中使用以下项目名和端口，并先准备模型文件。首次调用启动脚本可生成该副本的凭据与证书。替身服务仅在验收 Compose 覆盖文件中启动。
+
+```powershell
+$env:COMPOSE_PROJECT_NAME = 'tax-product-p5'
+$env:PRODUCT_IMPORTER_IMAGE = 'tax-product-p5-importer'
+$env:PRODUCT_HTTP_PORT = '13105'
+$env:PRODUCT_HTTPS_PORT = '13446'
+powershell -ExecutionPolicy Bypass -File product/start.ps1 -Https
+docker compose -f product/compose.yaml -f product/compose.https.yaml -f product/compose.agent-test.yaml up -d --build --wait
+$env:PRODUCT_TEST_BASE = 'https://127.0.0.1:13446'
+$env:SSL_CERT_FILE = (Resolve-Path product/tls/local/ca.crt).Path
+python -m pip install -r product/requirements-verify.txt
+python product/verify_agent.py
+python product/verify_https.py
+python product/verify_access.py
+python product/verify.py
+python product/verify.py --p3
+python product/verify_import.py
+python product/verify_bank.py
+python product/verify_agent.py --details
+python product/verify_restore.py
+```
+
+基础替身验收需要初始三张发票，扩展导入测试放在其后。验证未配置模型时，先将 agent 替换为无模型配置，测完再恢复替身。
+
+```powershell
+docker compose -f product/compose.yaml -f product/compose.https.yaml -f product/compose.agent-test.yaml -f product/compose.agent-unconfigured.yaml up -d --no-deps --force-recreate --wait agent
+python product/verify_agent.py --unconfigured
+docker compose -f product/compose.yaml -f product/compose.https.yaml -f product/compose.agent-test.yaml up -d --no-deps --force-recreate --wait agent
+```
+
+真实模型在另一套初始数据上执行 `python product/verify_agent.py --live`。该副本的 `.env` 必须配置实际模型，Agent 容器还需设置 `PRODUCT_AGENT_EVIDENCE_DIR=/embedding-cache/p5-live-evidence` 以留存脱敏原始响应。脚本核对容器模型名称，逐项输出通过或失败，失败以非零退出码结束。结果和原始响应保存在副本的 `data/agent-live-时间/`。详见 [P5 验收记录](P5验收记录.md)。
+
+独立替身实例需要手工验证前端时，可额外叠加 `compose.agent-ui.yaml`。该覆盖文件为演示 HTTP 测试关闭 Secure Cookie，并仅将前端绑定在回环端口 13108；本轮浏览器点击验收仍标为待验证。产品的正常 HTTPS 启动命令使用基础配置与 HTTPS 配置。
