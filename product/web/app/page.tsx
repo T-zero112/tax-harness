@@ -1,114 +1,231 @@
 "use client";
-import { FormEvent, useState } from "react";
-import InvoiceWorkflow, {type Enterprise} from "./invoice-workflow";
+import { FormEvent, useState, useEffect } from "react";
+import InvoiceWorkflow, { api, type Enterprise } from "./invoice-workflow";
 import RuleWorkflow from "./rule-workflow";
 import ImportWorkflow from "./import-workflow";
-
 import MemberWorkflow from "./member-workflow";
 import BankWorkflow from "./bank-workflow";
 import ChatWorkflow from "./chat-workflow";
 
 export default function Home() {
-  const [enterprises, setEnterprises] = useState<Enterprise[]>([]);
-  const [status, setStatus] = useState("");
-  const [username, setUsername] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [target, setTarget] = useState<{enterprise_id: string; invoice_id: string}>();
-
-  async function login(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    setBusy(true);
-    setEnterprises([]);
-    setTarget(undefined);
-    try {
-      const session = await fetch("/api/session", {
-        method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({username: form.get("username"), password: form.get("password")}),
+  const [enterprises, setEnterprises] = useState<Enterprise[]>([]),
+    [username, setUsername] = useState("");
+  const [loading, setLoading] = useState(true),
+    [busy, setBusy] = useState(false),
+    [status, setStatus] = useState("");
+  const [view, setView] = useState("chat"),
+    [scope, setScope] = useState(""),
+    [model, setModel] = useState("模型待验证");
+  const [target, setTarget] = useState<{
+    enterprise_id: string;
+    invoice_id: string;
+  }>();
+  async function load(identity: { username: string }) {
+    const [items, access] = await Promise.all([
+      api("/api/enterprises"),
+      api("/api/enterprise-access"),
+    ]);
+    const grants = new Map<string, Enterprise["role"]>(
+      access.map((r: Enterprise) => [r.enterprise_id, r.role]),
+    );
+    setEnterprises(
+      items.flatMap((r: Enterprise) =>
+        grants.has(r.enterprise_id)
+          ? [{ ...r, role: grants.get(r.enterprise_id) }]
+          : [],
+      ),
+    );
+    setUsername(identity.username);
+  }
+  useEffect(() => {
+    let live = true;
+    fetch("/api/session", { cache: "no-store" })
+      .then(async (r) => {
+        if (r.ok) {
+          const identity = await r.json();
+          if (live) await load(identity);
+        } else if (r.status !== 401)
+          throw new Error("会话检查失败，请刷新重试。");
+      })
+      .catch((e) => {
+        if (live) setStatus(e.message);
+      })
+      .finally(() => {
+        if (live) setLoading(false);
       });
-      if (!session.ok) throw new Error("登录失败，请检查账户和密码。");
-      const identity = await session.json();
-      const [response, access] = await Promise.all([fetch("/api/enterprises"), fetch("/api/enterprise-access")]);
-      if (!response.ok || !access.ok) throw new Error("企业权限读取失败。");
-      const grants = new Map<string, Enterprise["role"]>((await access.json()).map((row: Enterprise) => [row.enterprise_id, row.role]));
-      const items: Omit<Enterprise, "role">[] = await response.json();
-      setEnterprises(items.flatMap(item => {
-        const role = grants.get(item.enterprise_id);
-        return role ? [{...item, role}] : [];
-      }));
-      setUsername(identity.username);
-      setStatus(items.length ? "已登录" : "已登录，当前账户没有企业授权。");
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "请求失败");
+    const expired = () => {
+      setUsername("");
+      setEnterprises([]);
+      setStatus("会话已过期，请重新登录。");
+    };
+    window.addEventListener("session-expired", expired);
+    return () => {
+      live = false;
+      window.removeEventListener("session-expired", expired);
+    };
+  }, []);
+  async function login(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const f = new FormData(e.currentTarget);
+    setBusy(true);
+    try {
+      await load(
+        await api("/api/session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: f.get("username"),
+            password: f.get("password"),
+          }),
+        }),
+      );
+      setStatus("");
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "登录失败。");
     } finally {
       setBusy(false);
     }
   }
-
   async function logout() {
     setBusy(true);
     try {
-      const response = await fetch("/api/session", {method:"DELETE"});
-      if (!response.ok) throw new Error("退出失败，请重试。");
+      await api("/api/session", { method: "DELETE" });
       setUsername("");
       setEnterprises([]);
       setTarget(undefined);
-      setStatus("已退出");
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "退出失败。");
+      setStatus("已退出登录。");
+    } catch (e) {
+      setStatus(String(e));
     } finally {
       setBusy(false);
     }
   }
-
-  async function probe(enterprise: Enterprise) {
-    setBusy(true);
-    setStatus("正在检查连接");
-    try {
-      const response = await fetch("/api/enterprises/" + encodeURIComponent(enterprise.enterprise_id) + "/probe", {method:"POST"});
-      if (!response.ok || !response.body) throw new Error("连接检查失败。");
-      const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
-      let buffer = "";
-      let done = false;
-      while (true) {
-        const chunk = await reader.read();
-        if (chunk.done) break;
-        buffer += chunk.value;
-        const frames = buffer.split("\n\n");
-        buffer = frames.pop() ?? "";
-        for (const frame of frames) {
-          const data = frame.split("\n").find(line => line.startsWith("data: "));
-          if (data) setStatus(data.slice(6));
-          if (frame.startsWith("event: done\n")) done = true;
-        }
-      }
-      if (!done) throw new Error("连接检查中断。");
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "请求失败");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return <main style={{maxWidth: 680, margin:"4rem auto", padding:"0 1rem", fontFamily:"system-ui"}}>
-    <h1>财税资料核验工作台</h1>
-    {username ? <p>当前账户 {username} <button disabled={busy} onClick={logout}>退出登录</button></p> :
-    <form onSubmit={login} style={{display:"grid", gap:12, maxWidth:320}}>
-      <label>账户 <input name="username" autoComplete="username" required /></label>
-      <label>密码 <input name="password" type="password" autoComplete="current-password" required /></label>
-      <button disabled={busy}>登录</button>
-    </form>}
-    <ul>{enterprises.map(enterprise => <li key={enterprise.enterprise_id}>
-      {enterprise.name}（{enterprise.enterprise_id}） <button disabled={busy} onClick={() => probe(enterprise)}>检查 Agent 连接</button>
-    </li>)}</ul>
-    <p role="status">{status}</p>
-    {enterprises.length > 0 && <ChatWorkflow key={username} enterprises={enterprises} />}
-    {enterprises.length > 0 && <ImportWorkflow enterprises={enterprises} inspect={setTarget} />}
-    {enterprises.length > 0 && <InvoiceWorkflow key={target ? target.enterprise_id + "/" + target.invoice_id : "default"}
-      enterprises={enterprises} target={target} />}
-    {enterprises.length > 0 && <RuleWorkflow enterprises={enterprises} />}
-    {enterprises.length > 0 && <BankWorkflow enterprises={enterprises} />}
-    {enterprises.some(item => item.role === "admin") &&
-      <MemberWorkflow enterprises={enterprises.filter(item => item.role === "admin")} />}
-  </main>;
+  return (
+    <main className="app-shell">
+      <header className="topbar">
+        <div className="brand">
+          <span className="brand-mark">税</span>
+          <div>
+            <strong>财税资料核验工作台</strong>
+            <small>对话 · 核验 · 人工确认</small>
+          </div>
+        </div>
+        {username && (
+          <>
+            <nav aria-label="工作台导航">
+              <button
+                aria-pressed={view === "chat"}
+                onClick={() => setView("chat")}
+              >
+                对话工作台
+              </button>
+              <button
+                aria-pressed={view === "data"}
+                onClick={() => setView("data")}
+              >
+                业务数据
+              </button>
+            </nav>
+            <div className="account">
+              <span>{scope}</span>
+              <span className="tag" data-testid="model-status">
+                {model}
+              </span>
+              <span>{username}</span>
+              <button disabled={busy} onClick={logout}>
+                退出登录
+              </button>
+            </div>
+          </>
+        )}
+      </header>
+      {loading ? (
+        <p role="status" className="login-card">
+          正在恢复登录状态…
+        </p>
+      ) : !username ? (
+        <section className="login-card">
+          <span className="eyebrow">财税工作空间</span>
+          <h1>登录工作台</h1>
+          <p>查询资料、核对依据，由你确认每一次保存。</p>
+          <form onSubmit={login}>
+            <label>
+              账户
+              <input name="username" autoComplete="username" required />
+            </label>
+            <label>
+              密码
+              <input
+                name="password"
+                type="password"
+                autoComplete="current-password"
+                required
+              />
+            </label>
+            <button className="primary" disabled={busy}>
+              登录
+            </button>
+          </form>
+          <p role="status">{status}</p>
+        </section>
+      ) : (
+        <>
+          {status && (
+            <p role="status" className="notice">
+              {status}
+            </p>
+          )}
+          {!enterprises.length ? (
+            <p className="notice">当前账户没有企业授权，请联系管理员。</p>
+          ) : (
+            <>
+              <div hidden={view !== "chat"}>
+                <ChatWorkflow
+                  key={username}
+                  enterprises={enterprises}
+                  onScope={setScope}
+                  onModel={setModel}
+                />
+              </div>
+              <section
+                className="data-page"
+                hidden={view !== "data"}
+                aria-label="业务数据"
+              >
+                <div className="page-intro">
+                  <span className="eyebrow">业务数据</span>
+                  <h1>资料与权限</h1>
+                  <p>查看和维护已授权企业的业务资料。</p>
+                </div>
+                <div className="data-grid">
+                  <ImportWorkflow
+                    enterprises={enterprises}
+                    inspect={setTarget}
+                  />
+                  <InvoiceWorkflow
+                    key={
+                      target
+                        ? target.enterprise_id + target.invoice_id
+                        : "default"
+                    }
+                    enterprises={enterprises}
+                    target={target}
+                  />
+                  <RuleWorkflow enterprises={enterprises} />
+                  <BankWorkflow enterprises={enterprises} />
+                  {enterprises.some((e) => e.role === "admin") && (
+                    <MemberWorkflow
+                      enterprises={enterprises.filter(
+                        (e) => e.role === "admin",
+                      )}
+                    />
+                  )}
+                </div>
+              </section>
+            </>
+          )}
+        </>
+      )}
+    </main>
+  );
 }

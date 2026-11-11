@@ -14,7 +14,8 @@ export async function api(path: string, options?: RequestInit) {
       400: "输入或确认无效。", 401: "请重新登录。", 403: "当前账户没有修改权限。",
       404: "当前范围内没有找到该记录。", 409: "版本或确认记录冲突，请重新核验。",
     };
-    throw new Error(messages[response.status] ?? "请求失败，请稍后重试。");
+    if (response.status === 401) window.dispatchEvent(new Event("session-expired"));
+    throw new Error(messages[response.status] ?? (response.status === 503 ? "模型未配置，请稍后重试。" : "请求失败，请检查连接后重试。"));
   }
   return response.status === 204 ? undefined : response.json();
 }
