@@ -1,0 +1,13 @@
+{
+  "source_commit": "2360c5880fde43514edaa5069cb1f14e4f7d806f",
+  "note": "Source workspace contains uncommitted competition fixes. Hashes pin the actual read-only porting references; only amount_guards.py is copied verbatim.",
+  "sha256": {
+    "src/tax_harness/executor.py": "31aa9248691ce907fc839ae23e047a92c6ffb5e1564e60b81a2624ca5c0d8552",
+    "src/tax_harness/model_adapter.py": "799ddf713884d7c7ca84c2f226ea018728e5fa60efc18fe65e14082ea023a6a5",
+    "src/tax_harness/context.py": "825ae859e0c301976f41f0371a11e454a5d2ae7df3b70d1640f048076aa48a28",
+    "src/tax_harness/query_completion.py": "e13085826af7e4c2aa4bb6be1850df29e087c11969e80d6135bc9ccdbeecf994",
+    "src/tax_harness/query_evidence.py": "3b34517162ee60e11f565ec186dd142b6ac8a0503e82f3db3c84de668acd543d",
+    "src/tax_harness/turn_guards.py": "5152d76ea52cd8b47debe113e32a7d02b2816f881a721f31ace9f4c7b5651932",
+    "src/tax_harness/contracts.py": "512c6713d7eb8e3e1a89e40aa00c20f6e61a7dd823cf14b47cdcd2f64e9be1c8"
+  }
+}

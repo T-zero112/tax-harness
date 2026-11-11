@@ -139,8 +139,16 @@ public class AgentChat {
                 +" from product_bank_transaction where "+where+" order by transaction_id limit 101",params.toArray());
             data=Map.of("records",rows.size()>100 ? rows.subList(0,100):rows,"has_more",rows.size()>100,"summary",totals);
         } else throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Unknown tool");
-        return Map.of("status","succeeded","data",data,"object_id",invoice,"scope",
-                Map.of("enterprise_id",enterprise,"period",lease.period()));
+        Map<String,Object> result=new LinkedHashMap<>();
+        result.put("status","succeeded");
+        result.put("data",data);
+        result.put("error",null);
+        result.put("object_id",invoice);
+        String operationId=tool.equals("create_proposal") ? json.valueToTree(data).path("proposal").path("proposal_id").asText(null)
+                : tool.equals("get_operation") ? args.path("proposal_id").asText(null) : null;
+        result.put("operation_id",operationId);
+        result.put("scope",Map.of("enterprise_id",enterprise,"period",lease.period()));
+        return result;
     }
 
     private Object operation(ChatScopes.Lease lease,String invoice,String proposal) {

@@ -6,6 +6,7 @@ import ImportWorkflow from "./import-workflow";
 
 import MemberWorkflow from "./member-workflow";
 import BankWorkflow from "./bank-workflow";
+import ChatWorkflow from "./chat-workflow";
 
 export default function Home() {
   const [enterprises, setEnterprises] = useState<Enterprise[]>([]);
@@ -101,6 +102,7 @@ export default function Home() {
       {enterprise.name}（{enterprise.enterprise_id}） <button disabled={busy} onClick={() => probe(enterprise)}>检查 Agent 连接</button>
     </li>)}</ul>
     <p role="status">{status}</p>
+    {enterprises.length > 0 && <ChatWorkflow key={username} enterprises={enterprises} />}
     {enterprises.length > 0 && <ImportWorkflow enterprises={enterprises} inspect={setTarget} />}
     {enterprises.length > 0 && <InvoiceWorkflow key={target ? target.enterprise_id + "/" + target.invoice_id : "default"}
       enterprises={enterprises} target={target} />}

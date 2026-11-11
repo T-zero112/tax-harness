@@ -12,6 +12,12 @@ try {
             "PRODUCT_${setting}=" + [guid]::NewGuid().ToString('N') | Add-Content -LiteralPath '.env' -Encoding ascii
         }
     }
+    foreach ($setting in 'MODEL_BASE_URL', 'MODEL_NAME', 'MODEL_API_KEY') {
+        if (!(Select-String -LiteralPath '.env' -Pattern "^PRODUCT_${setting}=" -Quiet)) {
+            "PRODUCT_$setting=" | Add-Content -LiteralPath '.env' -Encoding ascii
+        }
+    }
+    Write-Host 'Chat needs PRODUCT_MODEL_BASE_URL and PRODUCT_MODEL_NAME in product/.env.'
     $composeFiles = @('-f', 'compose.yaml')
     if ($Https) {
         & (Join-Path $PSScriptRoot 'tls/generate-local.ps1')

@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from fastembed import TextEmbedding
 from huggingface_hub import snapshot_download
 from huggingface_hub.errors import LocalEntryNotFoundError
+from chat_api import router as chat_router
 
 
 class ProbeState(TypedDict):
@@ -29,6 +30,7 @@ builder.add_edge(START, "respond")
 builder.add_edge("respond", END)
 graph = builder.compile()
 app = FastAPI()
+app.include_router(chat_router)
 token = os.environ["AGENT_TOKEN"]
 
 

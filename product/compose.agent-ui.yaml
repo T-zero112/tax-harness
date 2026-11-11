@@ -1,0 +1,7 @@
+services:
+  business:
+    environment:
+      PRODUCT_SESSION_SECURE: "false"
+  web:
+    ports:
+      - "127.0.0.1:${PRODUCT_AGENT_UI_PORT:-13108}:3000"

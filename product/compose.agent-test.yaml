@@ -1,0 +1,15 @@
+services:
+  model-stub:
+    image: python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
+    command: ["python", "/tests/verify_agent.py", "--serve"]
+    volumes:
+      - ./verify_agent.py:/tests/verify_agent.py:ro
+  agent:
+    environment:
+      PRODUCT_MODEL_BASE_URL: http://model-stub:9000/v1
+      PRODUCT_MODEL_NAME: product-scripted-verifier
+      PRODUCT_MODEL_API_KEY: p5-test-only-model-key
+      PRODUCT_MODEL_STRUCTURED: schema
+      PRODUCT_MODEL_TIMEOUT: "10"
+      PRODUCT_CONTEXT_BUDGET: "24000"
+      PRODUCT_AGENT_EVIDENCE_DIR: /embedding-cache/p5-evidence

@@ -1,0 +1,5 @@
+services:
+  agent:
+    environment:
+      PRODUCT_MODEL_BASE_URL: ""
+      PRODUCT_MODEL_NAME: ""
