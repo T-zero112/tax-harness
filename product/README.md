@@ -229,3 +229,41 @@ python product/verify_restore.py
 结果及脱敏轨迹写入副本的 `data/agent-memory-时间/`。模型替身会真实接收请求，脚本将其捕获内容与已持久化轨迹对照。未知写入场景用隔离数据库故障注入构造，核实和拦截走真实 Java API；不作为真实网络故障提交的证明。备份恢复演练会独立启动数据库和对象存储，核对所有表内容与原件 SHA-256。
 
 `verify_memory.py --snapshot` 只读导出六张既有业务表，排除 V8 新增列，用于 V7→V8 前后比较。实际升级前先保存数据库和原件备份并验证可恢复，升级后再比较快照。详细结果、证据目录和限制见 [P6 验收记录](P6验收记录.md)。本轮 P6 使用替身验证程序行为；P6 真实 Qwen3 8B 测试和浏览器实际点击确认另行记录，不将替身结果算作真实模型通过。
+
+## P7 对话工作台与过程面板
+
+默认进入三栏对话工作台：左侧企业、月份、任务与偏好；中间历史消息和输入；右侧执行过程、证据与待确认建议。宽度不超过 900px 时使用“对话 / 过程 / 任务”视图按钮，业务模块统一放在顶部“业务数据”入口。主色沿用 #002FA7，没有新增 npm 运行依赖。
+
+新增 `GET /api/session`，仅返回有效会话的 username 和 tenant_id，响应不缓存；无效会话返回 401。页面刷新后自动恢复登录与未结束任务，退出或过期回到登录页。确认依然携带 X-Chat-Scope、Idempotency-Key，恢复、月份和未核实操作限制保留。保存结果未知会禁用再次确认，并提供核实入口。
+
+SSE 仅增加 `decision`（step、kind）、`requirements`（items）事件，以及 tool_result.duration_ms；原事件字段保持兼容。持久轨迹增加 context_budget，用于过程面板显示真实预算。过程按轮次展示需求、步骤、工具、证据、拦截与上下文，脱敏模型输入默认折叠。证据卡的“已核实”仅在成功答案实际引用本轮有效证据时显示。旧轨迹缺少的测量字段显示“未返回”。
+
+模型状态默认“模型待验证”，首次对话被接收后标“模型已配置”；收到 503 时标“模型未配置”。这是配置可用性判断，不代表模型回答正确。现有 probe 只能证明 Agent 连接，不据此推断模型配置。P6 的 Qwen3 8B 未通过项继续保留。
+
+### P7 浏览器验收
+
+使用独立源码副本，准备离线向量模型文件和 localhost CA。Windows 测试需已安装 Microsoft Edge，Python 3.12；Playwright 使用本机 Edge，无需下载额外浏览器。初始化及启动按独立验收说明，变量如下：
+
+```powershell
+$env:COMPOSE_PROJECT_NAME = 'tax-product-p7'
+$env:PRODUCT_IMPORTER_IMAGE = 'tax-product-p7-importer'
+$env:PRODUCT_HTTP_PORT = '13110'
+$env:PRODUCT_HTTPS_PORT = '13449'
+powershell -ExecutionPolicy Bypass -File product/start.ps1 -Https
+$files = @('-f','product/compose.yaml','-f','product/compose.https.yaml',
+ '-f','product/compose.agent-test.yaml','-f','product/compose.memory-test.yaml')
+docker compose @files up -d --build --wait
+$env:PRODUCT_TEST_BASE = 'https://localhost:13449'
+$env:SSL_CERT_FILE = (Resolve-Path product/tls/local/ca.crt).Path
+python -m pip install -r product/requirements-verify.txt -r product/requirements-ui.txt
+python product/verify_agent.py
+python product/verify_ui.py
+```
+
+Edge 必须信任该副本用于 localhost 的 CA；脚本不忽略 TLS 错误。复用本机已受信任的开发服务证书时，仅在被 Git 忽略的测试证书目录操作，不能提交证书私钥。UI 脚本会更改合成数据、模拟并发版本冲突、使测试会话过期，并临时切换 Agent 为未配置模型后恢复；不得对主工作台运行。
+
+结果和 1440×900、390×844 截图输出到副本 `data/p7-ui-时间/`。脚本包含真实浏览器点击、真实业务写入、独立回查和同键重放，模型仍是替身。其后执行 verify_https/access、verify.py、verify.py --p3、verify_import/bank、verify_agent.py --details、verify_restore.py。未改动的 verify_memory.py 有 tax-product-p6 项目名保护，应在另一份采用同一 P7 源码的独立 tax-product-p6 实例运行，不要修改该保护来适配 P7。
+
+详细检查与截图见 [P7 验收记录](P7验收记录.md)。完整 B01—B35 真实模型复验、模型动作稳定性修复与视频发布包仍属于后续阶段。
+
+恢复脚本若报独立服务未就绪，先查看具体 Docker 错误。若源容器的 Image ID 已不存在，在独立验收实例的静默窗口用相同 Compose 配置执行 `up -d --no-deps --force-recreate --wait importer worker`，再重跑原恢复脚本；不要修改其内容一致性检查。P7 本轮遇到并修复了这一镜像引用问题。
