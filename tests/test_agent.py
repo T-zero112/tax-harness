@@ -145,7 +145,8 @@ def test_intervening_model_failure_invalidates_unconfirmed_proposal(tmp_path):
 
 
 def test_unconfigured_model_and_missing_month(tmp_path, monkeypatch):
-    for key in ("HARNESS_MODEL_ENDPOINT", "HARNESS_MODEL_NAME", "HARNESS_MODEL_KEY"):
+    for key in ("HARNESS_MODEL_ENDPOINT", "HARNESS_MODEL_NAME", "HARNESS_MODEL_KEY",
+                "OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_API_KEY"):
         monkeypatch.delenv(key, raising=False)
     with TestClient(create_app(tmp_path / "unconfigured.sqlite3")) as client:
         assert send(client, "q", "查询").status_code == 503

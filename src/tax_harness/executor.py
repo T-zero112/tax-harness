@@ -42,6 +42,7 @@ class Outcome:
     operation_ids: list[str] = field(default_factory=list)
     blocked: bool = False
     failed: bool = False
+    model_unavailable: bool = False
 
 
 def failed_tool(code, message) -> ToolResult:
@@ -171,7 +172,7 @@ class TurnExecutor:
                 outcome = Outcome(str(exc), failed=True)
             except ModelUnavailable as exc:
                 self.event(turn.task_id, "model_unavailable", {"message": str(exc)})
-                outcome = Outcome(str(exc), failed=True)
+                outcome = Outcome(str(exc), failed=True, model_unavailable=True)
             except (PermissionError, sqlite3.Error):
                 outcome = Outcome("本轮无法读取业务资料，请检查权限或数据服务。", failed=True)
             if turn.state.get("proposal") is previous_proposal:
@@ -408,6 +409,8 @@ class TurnExecutor:
                 elif turn.state.get("question"):
                     status = TaskStatus.WAITING_USER
                     pending.append(turn.state["question"])
+                elif outcome.model_unavailable:
+                    status = TaskStatus.RUNNING
                 else:
                     status = TaskStatus.COMPLETED
                 connection.execute("UPDATE tasks SET status=?,state_json=?,revision=revision+1 WHERE task_id=?",
