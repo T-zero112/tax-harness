@@ -75,6 +75,7 @@ CREATE TABLE memory_invalidations (
     memory_id TEXT NOT NULL REFERENCES memories,
     message_id TEXT NOT NULL REFERENCES messages,
     revision INTEGER NOT NULL CHECK (revision>=1),
+    superseded_content TEXT,
     PRIMARY KEY(memory_id,message_id,revision)
 );
 CREATE TABLE rules (

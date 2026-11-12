@@ -10,12 +10,16 @@ from tax_harness.answer_checks import (
     amount_coverage_issue, asserts_pending_proposal, invoice_mentioned, present_bank_result,
 )
 from tax_harness.app import create_app
-from tax_harness.contracts import BankFilters, ContextBundle, ToolResult
+from tax_harness.context import SqliteContextBuilder
+from tax_harness.contracts import BankFilters, ContextBundle, ContextRequest, Scope, ToolResult
+from tax_harness.database import Database
+from tax_harness.memory import SqliteMemoryStore
 from tax_harness.model_adapter import (
     TIMEOUT_MESSAGE, AnswerDecision, AskDecision, ChatCompletionsModel, InvalidDecision, ModelUnavailable,
     ToolDecision,
     configured_model,
 )
+from tax_harness.rules import SqliteRuleStore
 from test_agent import HEADERS, PARAMS, ScriptedModel, proposal, read_invoice, seed, send
 
 
@@ -339,6 +343,50 @@ def test_ask_citations_are_ignored_and_schema_errors_name_the_field():
     with pytest.raises(InvalidDecision) as answer_extra:
         decide_from('{"kind":"answer","reply":"已核对","nope":true}')
     assert str(answer_extra.value) == "answer 不允许字段 nope"
+
+
+def test_corrected_preference_text_leaves_the_model_context_only(tmp_path):
+    database = Database(tmp_path / "preference.sqlite3")
+    database.initialize()
+    scope = Scope(user_id="U001", enterprise_id="C001", month="2026-09")
+    old_reply = "好的，后续回复我会先列汇总，再补充明细或说明。"
+    with database.write() as connection:
+        connection.execute(
+            "INSERT INTO tasks(task_id,user_id,enterprise_id,month,status) VALUES ('t1','U001','C001','2026-09','running')"
+        )
+        connection.executemany(
+            "INSERT INTO messages(message_id,task_id,session_id,role,content) VALUES (?,?,?,?,?)",
+            [("user-1", "t1", "s1", "user", "请记住先列汇总"),
+             ("assistant-old", "t1", "s1", "assistant", old_reply),
+             ("assistant-other", "t1", "s1", "assistant", "本月发票共 10 张。")],
+        )
+    store = SqliteMemoryStore(database)
+    memory = store.create(scope, "先列汇总", "user-1")
+    store.correct(scope, memory.memory_id, "先列明细", 1)
+    bundle = SqliteContextBuilder(database, store, SqliteRuleStore(database)).build(ContextRequest(
+        scope=scope, task_id="t1", task_revision=1, task_state={}, user_input="按我的偏好列发票",
+        input_token_budget=12000,
+    ))
+    visible = "\n".join(item["content"] for item in bundle.messages)
+    assert "先列汇总" not in visible
+    assert "先列明细" in visible and "本月发票共 10 张" in visible
+    with database.write() as connection:
+        connection.execute(
+            "INSERT INTO messages(message_id,task_id,session_id,role,content) VALUES ('assistant-new','t1','s1','assistant',?)",
+            ("之后按先列明细展示。",),
+        )
+    store.delete(scope, memory.memory_id, 2)
+    deleted = SqliteContextBuilder(database, store, SqliteRuleStore(database)).build(ContextRequest(
+        scope=scope, task_id="t1", task_revision=1, task_state={}, user_input="再查一次",
+        input_token_budget=12000,
+    ))
+    after_delete = "\n".join(item["content"] for item in deleted.messages)
+    assert "先列明细" not in after_delete and "先列汇总" not in after_delete
+    assert "本月发票共 10 张" in after_delete
+    with database.connect() as connection:
+        stored = connection.execute("SELECT content FROM messages WHERE message_id='assistant-old'").fetchone()[0]
+        kept = connection.execute("SELECT content FROM messages WHERE message_id='assistant-new'").fetchone()[0]
+    assert stored == old_reply and kept == "之后按先列明细展示。"
 
 
 def test_fix4_longer_identifier_does_not_count_as_the_target(tmp_path):

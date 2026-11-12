@@ -6,6 +6,22 @@ from .database import Database
 from .ports import RevisionConflict
 
 MEMORY_FIELDS = "memory_id,user_id,enterprise_id,content,source_message_id,revision"
+_PLACEHOLDER = "[该偏好已被更正]"
+
+
+def _redact_message(message: HistoryMessage, pairs: list[tuple[str, str]]) -> HistoryMessage:
+    updated = message.content
+    for old, current in sorted(pairs, key=lambda item: len(item[0] or ""), reverse=True):
+        old = (old or "").strip()
+        if len(old) < 4 or old not in updated:
+            continue
+        current = (current or "").strip()
+        if current and old in current and current in updated:
+            continue
+        updated = updated.replace(old, _PLACEHOLDER)
+    if updated == message.content:
+        return message
+    return message.model_copy(update={"content": updated})
 
 
 class SqliteMemoryStore:
@@ -65,9 +81,14 @@ class SqliteMemoryStore:
                 raise RevisionConflict("偏好已更新，请重新读取")
             revision = expected_revision + 1
             source_id = row["source_message_id"]
+            previous = connection.execute("SELECT content FROM memories WHERE memory_id=?", (memory_id,)).fetchone()
             connection.execute("UPDATE memories SET content=?,revision=?,active=? WHERE memory_id=?",
                                (content or "", revision, int(content is not None), memory_id))
-            connection.execute("INSERT INTO memory_invalidations VALUES (?,?,?)", (memory_id, source_id, revision))
+            superseded = previous["content"] if content != previous["content"] else None
+            connection.execute(
+                "INSERT INTO memory_invalidations(memory_id,message_id,revision,superseded_content) VALUES (?,?,?,?)",
+                (memory_id, source_id, revision, superseded),
+            )
         return MutationReceipt(reference=RevisionRef(kind="memory", identifier=memory_id, revision=revision),
                                invalidated_message_ids=[source_id])
 
@@ -83,7 +104,16 @@ class SqliteMemoryStore:
                 (scope.user_id, scope.enterprise_id, scope.month),
             )
             allowed = {row["message_id"]: HistoryMessage(**dict(row)) for row in rows}
-        return [allowed[message.message_id] for message in messages if message.message_id in allowed]
+            superseded = connection.execute(
+                "SELECT i.superseded_content, CASE WHEN p.active=1 THEN p.content ELSE '' END "
+                "FROM memory_invalidations i JOIN memories p ON p.memory_id=i.memory_id "
+                "WHERE p.user_id=? AND (p.enterprise_id=? OR p.enterprise_id IS NULL) "
+                "AND i.superseded_content IS NOT NULL",
+                (scope.user_id, scope.enterprise_id),
+            ).fetchall()
+        pairs = [(row[0], row[1] or "") for row in superseded]
+        return [_redact_message(allowed[message.message_id], pairs)
+                for message in messages if message.message_id in allowed]
 
     def is_current(self, scope: Scope, reference: RevisionRef) -> bool:
         return reference.kind == "memory" and any(
