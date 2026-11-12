@@ -3,9 +3,11 @@
 Business writes do not use this module. A read timeout may be retried once.
 """
 
+import json
 import re
 
 import httpx
+from pydantic import ValidationError
 
 TIMEOUT_MESSAGE = "模型请求超时，本次没有得到可用结果。请稍后使用新的请求编号重试。"
 REQUEST_FAILED_MESSAGE = "模型请求失败，请稍后重试。"
@@ -77,17 +79,63 @@ def _post(model, context) -> str:
     return content
 
 
+_FIELD = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,40}")
+
+
+def _safe_field(name: str) -> str:
+    return name if _FIELD.fullmatch(name) else "字段"
+
+
+def describe_decision_error(exc: ValidationError) -> str:
+    """Name the failing field. Do not echo values, URLs, or exception text."""
+    parts = []
+    for err in exc.errors()[:4]:
+        if err.get("type") in {"json_invalid", "json_type"}:
+            return "动作不是合法 JSON。"
+        if err.get("type") == "union_tag_invalid":
+            parts.append("kind 取值无效")
+            continue
+        if err.get("type") == "union_tag_not_found":
+            parts.append("缺少字段 kind")
+            continue
+        loc = [str(part) for part in err.get("loc", ()) if part not in {"", "__root__"}]
+        kind = loc[0] if loc and loc[0] in {"ask", "answer", "tool"} else ""
+        field = _safe_field(".".join(loc[1:] if kind else loc) or "内容")
+        prefix = f"{kind} " if kind else ""
+        if err.get("type") == "extra_forbidden":
+            parts.append(f"{prefix}不允许字段 {field}".strip())
+        elif err.get("type") == "missing":
+            parts.append(f"{prefix}缺少字段 {field}".strip())
+        else:
+            parts.append(f"{prefix}{field} 不符合要求".strip())
+    return "；".join(dict.fromkeys(parts)) or "模型返回的动作格式无效。"
+
+
+def without_ask_citations(text: str) -> str:
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return text
+    if isinstance(payload, dict) and payload.get("kind") == "ask" and "citations" in payload:
+        payload = {key: value for key, value in payload.items() if key != "citations"}
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return text
+
+
 def parse_decision_content(content: str):
     from .model_adapter import DECISION, InvalidDecision
 
+    def load(text: str):
+        try:
+            return DECISION.validate_json(without_ask_citations(text))
+        except ValidationError as exc:
+            raise InvalidDecision(describe_decision_error(exc)) from exc
+
     text = content.strip()
     try:
-        return DECISION.validate_json(text)
-    except (TypeError, ValueError) as first_error:
+        return load(text)
+    except InvalidDecision:
         unwrapped = unwrap_decision_content(text)
         if unwrapped == text:
-            raise InvalidDecision("模型返回的动作格式无效。") from first_error
-        try:
-            return DECISION.validate_json(unwrapped)
-        except (TypeError, ValueError) as exc:
-            raise InvalidDecision("模型返回的动作格式无效。") from exc
+            raise
+        return load(unwrapped)

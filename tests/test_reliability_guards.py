@@ -319,6 +319,28 @@ def test_fix4_user_history_or_confirmed_target_allows_the_proposal(tmp_path):
         assert "F0020" not in confirmed["reply"]
 
 
+def test_ask_citations_are_ignored_and_schema_errors_name_the_field():
+    secret = "super-secret-key-value"
+    cited = (
+        '<tool_call>{"kind":"ask","reply":"请指定要补充的发票编号",'
+        '"citations":[{"doc_id":"R002","name":"甲企业发票用途规则","version":"2.0","entry":"main"}]}'
+        '</tool_call>'
+    )
+    decision = decide_from(cited)
+    assert decision.kind == "ask" and decision.reply == "请指定要补充的发票编号"
+    assert "citations" not in decision.model_dump()
+    with pytest.raises(InvalidDecision) as extra:
+        decide_from('{"kind":"ask","reply":"请指定票号","extra":"' + secret + '"}')
+    assert str(extra.value) == "ask 不允许字段 extra"
+    assert secret not in str(extra.value) and "Traceback" not in str(extra.value)
+    with pytest.raises(InvalidDecision) as missing:
+        decide_from('{"kind":"ask"}')
+    assert str(missing.value) == "ask 缺少字段 reply"
+    with pytest.raises(InvalidDecision) as answer_extra:
+        decide_from('{"kind":"answer","reply":"已核对","nope":true}')
+    assert str(answer_extra.value) == "answer 不允许字段 nope"
+
+
 def test_fix4_longer_identifier_does_not_count_as_the_target(tmp_path):
     model = ScriptedModel(propose_f002())
     app = create_app(tmp_path / "boundary.sqlite3", model=model)
