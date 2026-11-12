@@ -6,12 +6,14 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from tax_harness.answer_checks import amount_coverage_issue, asserts_pending_proposal, present_bank_result
 from tax_harness.app import create_app
-from tax_harness.contracts import ContextBundle
+from tax_harness.contracts import BankFilters, ContextBundle, ToolResult
 from tax_harness.model_adapter import (
-    TIMEOUT_MESSAGE, ChatCompletionsModel, InvalidDecision, ModelUnavailable, configured_model,
+    TIMEOUT_MESSAGE, AnswerDecision, ChatCompletionsModel, InvalidDecision, ModelUnavailable, ToolDecision,
+    configured_model,
 )
-from test_agent import HEADERS, PARAMS, seed, send
+from test_agent import ScriptedModel, proposal, read_invoice, seed, send
 
 
 def context():
@@ -169,3 +171,86 @@ def test_fix1_timeout_and_openai_compatible_settings(monkeypatch):
     model = configured_model()
     assert model.endpoint == "https://explicit.test/v1/chat/completions"
     assert model.model == "explicit-model" and model.key == "fixture-openai-key" and model.timeout == 75
+
+
+def income_only_observation():
+    result = ToolResult(status="succeeded", data={
+        "records": [{"direction": "income", "amount_cents": 1300050}],
+        "bank_count": 1, "income_cents": 1300050, "expense_cents": 0,
+    })
+    return [{"arguments": {"direction": "income", "transaction_id": None}, "result": result}]
+
+
+def test_fix3_uncovered_expense_amounts_and_false_pending_claims_are_rejected():
+    observed = income_only_observation()
+    assert amount_coverage_issue("银行支出 0.00 元。", observed)
+    assert amount_coverage_issue("银行支出 7,180.74 元。", observed)
+    assert amount_coverage_issue("银行收入 13000.50 元。", observed) is None
+    full = ToolResult(status="succeeded", data={
+        "records": [{"direction": "income", "amount_cents": 1300050}, {"direction": "expense", "amount_cents": 718074}],
+        "income_cents": 1300050, "expense_cents": 718074,
+    })
+    covered = [{"arguments": {"direction": None, "transaction_id": None}, "result": full}]
+    assert amount_coverage_issue("银行收入 13000.50 元，银行支出 7180.74 元。", covered) is None
+    assert amount_coverage_issue("银行支出 0.00 元。", covered)
+    shown = present_bank_result(BankFilters(direction="income"), observed[0]["result"])
+    assert shown.data["income_cents"] == 1300050 and "expense_cents" not in shown.data
+    assert asserts_pending_proposal("旧提案仍待确认")
+    assert not asserts_pending_proposal("无法确认已付款，实际用途需要你补充。")
+    assert not asserts_pending_proposal("本轮没有待确认的修改。")
+
+
+def seed_bank(app):
+    with app.state.database.write() as connection:
+        connection.executemany(
+            "INSERT INTO bank_transactions(enterprise_id,transaction_id,transaction_date,direction,amount_cents,counterparty) "
+            "VALUES (?,?,?,?,?,?)",
+            [("C001", "T-IN", "2026-09-02", "income", 1300050, "客户"),
+             ("C001", "T-OUT", "2026-09-03", "expense", 718074, "供应商")],
+        )
+
+
+def test_fix3_income_query_cannot_answer_monthly_expense_until_it_is_covered(tmp_path):
+    model = ScriptedModel(
+        ToolDecision(kind="tool", name="list_bank_transactions", arguments={"direction": "income"}),
+        AnswerDecision(kind="answer", reply="银行收入 13000.50 元，银行支出 0.00 元。"),
+        ToolDecision(kind="tool", name="list_bank_transactions", arguments={}),
+        AnswerDecision(kind="answer", reply="银行收入 13000.50 元，银行支出 7180.74 元。"),
+    )
+    app = create_app(tmp_path / "coverage.sqlite3", model=model)
+    with TestClient(app) as client:
+        seed_bank(app)
+        response = send(client, "sum", "查询本月银行收入和支出").json()
+        assert response["reply"] == "银行收入 13000.50 元，银行支出 7180.74 元。"
+        assert response["operation_ids"] == []
+        shown = json.loads(next(item["content"] for item in model.inputs[1].messages if item["content"].startswith('{"kind":"工具结果"')))
+        assert shown["data"]["data"]["income_cents"] == 1300050 and "expense_cents" not in shown["data"]["data"]
+        assert any("尚未被查询覆盖" in item["content"] for item in model.inputs[2].messages)
+
+
+def test_fix3_covered_income_amount_is_accepted(tmp_path):
+    model = ScriptedModel(
+        ToolDecision(kind="tool", name="list_bank_transactions", arguments={"direction": "income"}),
+        AnswerDecision(kind="answer", reply="银行收入 13000.50 元。"),
+    )
+    app = create_app(tmp_path / "income.sqlite3", model=model)
+    with TestClient(app) as client:
+        seed_bank(app)
+        response = send(client, "income", "这个月进账多少").json()
+        assert response["reply"] == "银行收入 13000.50 元。" and len(model.inputs) == 2
+
+
+def test_fix3_cleared_proposal_cannot_be_described_as_still_pending(tmp_path):
+    model = ScriptedModel(
+        proposal(),
+        AnswerDecision(kind="answer", reply="旧提案仍待确认。"),
+        AnswerDecision(kind="answer", reply="本轮没有待确认的修改。"),
+    )
+    app = create_app(tmp_path / "pending.sqlite3", model=model)
+    with TestClient(app) as client:
+        seed(app)
+        assert "确认保存" in send(client, "propose", "请将 F001 用途改为办公资料").json()["reply"]
+        answered = send(client, "later", "现在还有待确认的修改吗").json()
+        assert answered["reply"] == "本轮没有待确认的修改。"
+        assert answered["pending_items"] == [] and "旧提案" not in answered["reply"]
+        assert read_invoice(client)["purpose"] is None

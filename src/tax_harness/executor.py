@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from .access import authorize
 from .agent_tools import TOOL_INPUTS
+from .answer_checks import present_bank_result, reply_consistency_issue
 from .business_writes import UNRESOLVED, VerificationFailure
 from .context import ContextBudgetExceeded, SqliteContextBuilder, encoded, rule_ref
 from .contracts import (
@@ -186,6 +187,7 @@ class TurnExecutor:
 
     def run_model(self, turn: Turn, request: MessageRequest, text: str) -> Outcome:
         results = []
+        observations = []
         for _ in range(6):
             context = self.context.build(ContextRequest(
                 scope=turn.scope, task_id=turn.task_id, task_revision=turn.revision,
@@ -200,6 +202,12 @@ class TurnExecutor:
                 results.append(failed_tool("invalid_argument", str(exc)))
                 continue
             self.event(turn.task_id, "model_decision", decision.model_dump(mode="json"))
+            if isinstance(decision, (AnswerDecision, AskDecision)):
+                issue = reply_consistency_issue(decision.reply, observations)
+                if issue:
+                    self.event(turn.task_id, "reply_rejected", {"message": issue})
+                    results.append(failed_tool("invalid_argument", issue))
+                    continue
             if isinstance(decision, AnswerDecision):
                 available = set(context.sources)
                 citations = {encoded(rule.citation.model_dump()): rule_ref(rule)
@@ -223,6 +231,9 @@ class TurnExecutor:
                 if decision.name == "propose_invoice_update":
                     return self.propose(turn, request, arguments, context.sources)
                 result = self.run_read_tool(turn.scope, decision.name, arguments)
+                if decision.name == "list_bank_transactions":
+                    observations.append({"arguments": arguments.model_dump(), "result": result})
+                    result = present_bank_result(arguments, result)
             except PermissionError:
                 result = failed_tool("forbidden", "当前用户无权执行此操作。")
             except KeyError:
