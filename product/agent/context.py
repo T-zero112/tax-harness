@@ -10,7 +10,7 @@ SYSTEM = """/no_think
 每次只输出一个JSON决策。kind为tool、ask、answer或propose。
 tool必须给tool和arguments；propose必须给arguments.invoice_id和changes。
 只可建议修改purpose和note，值必须来自用户。确认保存由用户点击，不可自行确认或声称已保存。
-首次决策登记requirements数组，每项包含requirement_id、kind、filters；登记后固定。
+程序登记并固定 requirements；首次可补充遗漏的合法需求，后续不要再输出 requirements。原 requirement_id、kind、filters 不可改写。
 kind可为invoice_total、income_total、expense_total、rules、invoices、review、operation。
 最终answer必须逐项给answer_items，每项requirement_id、evidence_ids和value_key。
 金额key为invoice_cents、income_cents、expense_cents；其他为rules、records、review、operation。
@@ -35,7 +35,9 @@ def messages(scope, text, memory, evidence, feedback, requirements, trace):
                "recent_operations": memory.get("recent_operations", []),
                "pending_invoice": memory["pending"], "pending_proposal": memory.get("proposal"),
                "evidence": evidence, "feedback": feedback,
-               "requirements": [r.model_dump() for r in requirements]}
+               "requirements": [r.model_dump() for r in requirements],
+               "requirements_registered": bool(memory.get("registered")),
+               "recommended_next_tools": __import__("guards").next_tools(requirements,evidence,memory)}
     prompt = [{"role": "system", "content": SYSTEM + "\n工具定义 " + json.dumps(definitions(), ensure_ascii=False)}]
     history = list(memory["history"])
     memories = list(memory["memories"])

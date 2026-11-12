@@ -42,6 +42,7 @@ def decide(state):
         return {"route": "finish", "events": [event("error", {"code": "step_limit", "message": "本轮未完成，请缩小问题后重试。"}),
                                               event("done", {"status": "incomplete"})]}
     try:
+        state["memory"]["registered"] = state["registered"]
         decision = model_adapter.decide(context.messages(state["scope"], state["body"]["message"],
             state["memory"], state["evidence"], state["feedback"], state["requirements"], state["memory"]["trace"]))
         state["memory"]["trace"]["decisions"].append(decision.model_dump())
@@ -51,9 +52,10 @@ def decide(state):
             return {"route": "finish", "events": [event("error", {"code": "context_budget_exceeded",
                     "message": "当前任务与证据超出上下文预算，请缩小问题。待办已保留。"}),
                     event("done", {"status": "incomplete"})]}
-        state["memory"]["trace"]["decisions"].append({"kind": "invalid", "code": "invalid_model_response"})
-        return {"steps": state["steps"] + 1, "route": "decide", "feedback": "invalid_model_response",
-                "events": [event("status", {"code": "invalid_model_response", "message": "模型决策无效，正在重试。"})]}
+        code = "unknown_tool" if str(error)=="unknown_tool" else "invalid_model_response"
+        state["memory"]["trace"]["decisions"].append({"kind":"invalid","code":code})
+        return {"steps": state["steps"] + 1, "route": "decide", "feedback": guards.feedback(code,state["requirements"],state["evidence"],state["memory"]),
+                "events": [event("status", {"code":code,"message":guards.feedback(code)["reason"]})]}
     except httpx.HTTPError:
         state["memory"]["trace"]["decisions"].append({"kind": "invalid", "code": "model_unavailable"})
         return {"route": "finish", "events": [event("error", {"code": "model_unavailable", "message": "模型请求失败或超时，待办已保留。"}),
@@ -125,11 +127,16 @@ def validate(state):
             "direction_mismatch", "filter_mismatch", "invoice_amount_unknown", "list_incomplete",
             "evidence_conflict", "requirements_missing", "requirements_fixed", "duplicate_requirements"
         } else "invalid_arguments"
-        message = "本轮没有生成提案。要修改就调用 propose 工具，否则如实说明尚未生成。" if code == "proposal_claim_without_event" else "当前答案或操作缺少匹配证据，正在重新核对。"
+        if code == "duplicate_requirements" and not state["registered"]:
+            requirements = state["requirements"]
+        detail = guards.feedback(code,requirements,state["evidence"],state["memory"])
+        if hasattr(error,"errors"):
+            detail["argument_errors"]=[{"field":".".join(str(x) for x in e["loc"]),"type":e["type"]} for e in error.errors(include_input=False)]
+        message = detail["reason"]
         events = [event("status", {"code":code,"message":message})]
         if code == "proposal_claim_without_event":
             events.append(event("status", {"code":"proposal_evidence_missing","message":message,"alias_of":code}))
-        return {"route":"decide","feedback":message if code=="proposal_claim_without_event" else code,
+        return {"route":"decide","feedback":detail,
                 "requirements":requirements,"registered":registered,"events":events}
 
 
@@ -158,6 +165,8 @@ def execute(state):
                                        "proposal_id": result["data"]["proposal"]["proposal_id"]}
         return {"route": "finish", "events": events + [event("proposal", result["data"]),
                 event("done", {"status": "pending_confirmation"})]}
+    if name == "list_recent_operations":
+        state["memory"]["recent_operations"] = result["data"]["operations"]
     proof = {"evidence_id": str(uuid4()), "tool": name, "arguments": arguments, "result": result}
     # Bound displayed detail, preserve whole-query aggregates separately.
     data = proof["result"]["data"]
@@ -201,7 +210,7 @@ def stream(body):
             updates = [{"scope_guard": {"events": entries}}]
         else:
             initial = {"body": body, "scope": scope, "memory": memory, "steps": 0, "evidence": [],
-                       "requirements": guards.required_by_text(body["message"]), "registered": False,
+                       "requirements": guards.required_by_text(body["message"],memory.get("pending")), "registered": False,
                        "feedback": "", "events": [], "started": started}
             updates = graph.stream(initial, {"recursion_limit": 30}, stream_mode="updates")
         for update in updates:

@@ -19,11 +19,62 @@ KINDS = {
 }
 
 
-def required_by_text(text):
-    specs = [("invoice_total", r"发票.{0,8}(合计|总额|汇总)"),
-             ("income_total", r"(银行)?收入"), ("expense_total", r"(银行)?支出"),
-             ("rules", r"规则|依据")]
-    return [Requirement(requirement_id="required_" + kind, kind=kind) for kind, pattern in specs if re.search(pattern, text)]
+def required_by_text(text, pending=None):
+    specs=[("invoice_total",r"发票.{0,8}(合计|总额|汇总)"),
+           ("income_total",r"(银行)?收入"),("expense_total",r"(银行)?支出"),("rules",r"规则|依据"),
+           ("review",r"检查.{0,20}用途|用途.{0,12}(符合|核验)"),
+           ("operation",r"是否.{0,4}保存|有没有保存|保存状态")]
+    invoice=target(text,pending)
+    return [Requirement(requirement_id="required_"+kind,kind=kind,
+            filters={"invoice_id":invoice} if invoice and kind in ("review","operation") else {})
+            for kind,pattern in specs if re.search(pattern,text)]
+
+
+def next_tools(requirements,evidence,memory):
+    recommendations=[]
+    for req in requirements:
+        tool,key,_=KINDS[req.kind]
+        args=dict(req.filters)
+        if req.kind=="rules":args.setdefault("query","发票用途")
+        if req.kind=="operation":
+            known=next((x for x in memory.get("recent_operations",[]) if not args.get("invoice_id") or x["invoice_id"]==args["invoice_id"]),None)
+            if known:args.update(invoice_id=known["invoice_id"],proposal_id=str(known["proposal_id"]))
+            else:tool="list_recent_operations";args={**args,"limit":5}
+        valid=[]
+        for proof in evidence:
+            try:
+                render([req],[__import__("model_adapter").AnswerItem(requirement_id=req.requirement_id,evidence_ids=[proof["evidence_id"]],value_key=key)],[proof]);valid.append(proof)
+            except (ValueError,KeyError,TypeError):pass
+        if not valid:recommendations.append({"requirement_id":req.requirement_id,"tool":tool,"arguments":args})
+    return recommendations
+
+
+def feedback(code,requirements=(),evidence=(),memory=None):
+    messages={
+      "proposal_claim_without_event":"本轮没有生成提案。要修改就调用 propose 工具，否则如实说明尚未生成。",
+      "unknown_tool":"tool 字段只能取工具清单中的枚举值；ask 不是工具，请使用 kind=ask 和 message。",
+      "requirements_fixed":"requirements 已由程序登记，后续不要再输出或改写；使用上下文中固定的 requirement_id。",
+      "duplicate_requirements":"requirement_id 重复或与另一种需求冲突；每个编号必须唯一，不得覆盖已有需求。",
+      "answer_items_incomplete":"answer_items 必须对固定需求逐项各提供一次，不能遗漏或重复；编号见 requirements。",
+      "evidence_mismatch":"evidence_ids 或 value_key 与需求不匹配；只用本轮成功工具返回的证据，value_key 见需求类型映射。",
+      "operation_target_unverified":"proposal_id 未在最近操作摘要或用户输入中确认。先 list_recent_operations，再用返回的真实编号 get_operation。",
+      "proposal_target_unverified":"invoice_id 不是用户已唯一确认的目标；请用 kind=ask 追问票号，不得猜测。",
+      "proposal_value_unverified":"changes 只能包含用户提供的 purpose/note 原文；缺内容应追问，不得自行补值。",
+      "amount_unverified":"message 中金额没有本轮证据支持；查询对应工具，金额通过 answer_items 交给程序渲染。",
+      "invalid_arguments":"arguments 不符合工具 Schema；检查字段名、必填项、枚举和类型，不能传企业/身份参数。",
+      "direction_mismatch":"银行证据方向错误；收入使用 direction=income 或不设方向，支出使用 expense 或不设方向。",
+      "filter_mismatch":"工具参数与固定 filters 不一致；按 requirements 中企业范围内的票号/销售方/项目条件重新查询。",
+      "invoice_amount_unknown":"发票金额存在未知值；不能把缺失当零或宣称合计完整，请追问补齐原始资料。",
+      "list_incomplete":"工具返回明细截断；不可宣称全部明细已完成，请缩小过滤范围。",
+      "evidence_conflict":"同一需求的工具证据数值冲突；重新核实，不能择一拼接为成功答案。",
+      "requirements_missing":"尚未登记业务需求；没有证据需求时请追问，不得直接宣布业务成功。",
+      "proposal_evidence_missing":"未取得真实保存/提案证据；生成建议用 propose，保存状态用 get_operation。",
+      "empty_reply":"message 缺少有意义内容；提供真实追问，或用本轮证据生成 answer_items。",
+      "invalid_model_response":"输出一个符合动作 Schema 的 JSON；kind 只能为 tool/ask/answer/propose。",
+    }
+    base=messages.get(code,"校验失败（"+code+"）。保留已有需求与证据，不能绕过校验；缺信息使用 kind=ask。")
+    hints=next_tools(requirements,evidence,memory or {})
+    return {"code":code,"reason":base,"fixed_requirements":[r.model_dump() for r in requirements],"recommended_next_tools":hints}
 
 
 def meaningful(text):

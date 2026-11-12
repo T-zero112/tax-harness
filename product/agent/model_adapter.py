@@ -26,29 +26,22 @@ class AnswerItem(StrictModel):
 
 class DecisionFields(StrictModel):
     claims_proposal: bool = False
-    tool: str | None = None
-    arguments: dict = Field(default_factory=dict)
     message: str = Field(default="", max_length=3000)
     requirements: list[Requirement] | None = None
-    answer_items: list[AnswerItem] = Field(default_factory=list)
-
 
 class ToolDecision(DecisionFields):
     kind: Literal["tool"]
-    tool: str
+    tool: Literal["list_invoices","list_bank_transactions","get_invoice","search_rules","check_purpose","create_proposal","get_operation","list_recent_operations"]
     arguments: dict
-
 
 class AskDecision(DecisionFields):
     kind: Literal["ask"]
-    message: str = Field(min_length=1, max_length=3000)
-
+    message: str = Field(min_length=1,max_length=3000)
 
 class AnswerDecision(DecisionFields):
     kind: Literal["answer"]
-    message: str = Field(min_length=1, max_length=3000)
+    message: str = Field(min_length=1,max_length=3000)
     answer_items: list[AnswerItem]
-
 
 class ProposeDecision(DecisionFields):
     kind: Literal["propose"]
@@ -57,6 +50,31 @@ class ProposeDecision(DecisionFields):
 
 DECISION = TypeAdapter(Annotated[ToolDecision | AskDecision | AnswerDecision | ProposeDecision,
                                 Field(discriminator="kind")])
+
+
+def decision_schema(registered=False):
+    from copy import deepcopy
+    from tools import TOOLS, Proposal
+    schema=DECISION.json_schema()
+    common=schema["$defs"]["ToolDecision"]
+    variants=[]
+    for name,arguments in TOOLS.items():
+        branch=deepcopy(common)
+        branch["properties"]["tool"]={"const":name,"type":"string"}
+        branch["properties"]["arguments"]=arguments.model_json_schema()
+        variants.append(branch)
+    schema["$defs"]["ToolDecision"]={"oneOf":variants}
+    schema["$defs"]["ProposeDecision"]["properties"]["arguments"]=Proposal.model_json_schema()
+    if registered:
+        def strip(node):
+            if isinstance(node,dict):
+                if node.get("properties",{}).get("kind"):
+                    node["properties"].pop("requirements",None)
+                for value in node.values():strip(value)
+            elif isinstance(node,list):
+                for value in node:strip(value)
+        strip(schema)
+    return schema
 
 
 def configured():
@@ -76,7 +94,7 @@ def decide(messages):
     body = {"model": os.environ["PRODUCT_MODEL_NAME"], "messages": messages, "temperature": 0, "max_tokens": 2048}
     if os.getenv("PRODUCT_MODEL_STRUCTURED", "none") == "schema":
         body["response_format"] = {"type": "json_schema", "json_schema": {
-            "name": "decision", "schema": DECISION.json_schema()}}
+            "name": "decision", "schema": decision_schema(bool(json.loads(messages[-1]["content"]).get("requirements_registered")))}}
     headers = {"Content-Type": "application/json"}
     key = os.getenv("PRODUCT_MODEL_API_KEY", "")
     if key:
@@ -102,4 +120,7 @@ def decide(messages):
     text = content.strip()
     if text.startswith("```") and text.endswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-    return DECISION.validate_json(text)
+    parsed=json.loads(text)
+    if isinstance(parsed,dict) and parsed.get("kind")=="tool" and parsed.get("tool") not in ToolDecision.model_fields["tool"].annotation.__args__:
+        raise ValueError("unknown_tool")
+    return DECISION.validate_python(parsed)
