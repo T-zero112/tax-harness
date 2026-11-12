@@ -106,6 +106,46 @@ def amount_coverage_issue(reply: str, observations) -> str | None:
     return " ".join(dict.fromkeys(problems))
 
 
+UNNAMED_INVOICE_QUESTION = "请提供要修改的发票编号。未在你的说明或已确认目标中出现的发票不能生成修改提案。"
+
+
+def record_bank_observation(observations, name, arguments, result):
+    if name != "list_bank_transactions":
+        return result
+    observations.append({"arguments": arguments.model_dump(), "result": result})
+    return present_bank_result(arguments, result)
+
+
+def inconsistent_reply(decision, observations) -> str | None:
+    if getattr(decision, "kind", None) not in {"answer", "ask"}:
+        return None
+    return reply_consistency_issue(decision.reply, observations)
+
+
+def invoice_mentioned(text: str, invoice_id: str) -> bool:
+    if not text or not invoice_id:
+        return False
+    return re.search(rf"(?<![A-Za-z0-9]){re.escape(invoice_id)}(?![A-Za-z0-9])", text, re.IGNORECASE) is not None
+
+
+def user_named_invoice(object_id: str | None, text: str, invoice_id: str, history: list[str]) -> bool:
+    if object_id and object_id.casefold() == invoice_id.casefold():
+        return True
+    if invoice_mentioned(text, invoice_id):
+        return True
+    return any(invoice_mentioned(item, invoice_id) for item in history)
+
+
+def user_invoice_history(database, scope) -> list[str]:
+    with database.connect() as connection:
+        rows = connection.execute(
+            "SELECT m.content FROM messages m JOIN tasks t ON t.task_id=m.task_id "
+            "WHERE t.user_id=? AND t.enterprise_id=? AND t.month=? AND m.role='user'",
+            (scope.user_id, scope.enterprise_id, scope.month),
+        ).fetchall()
+    return [row["content"] for row in rows]
+
+
 def asserts_pending_proposal(reply: str) -> bool:
     if "旧提案" in reply and not any(phrase in reply for phrase in ("没有旧提案", "无旧提案", "不是旧提案")):
         return True

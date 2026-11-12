@@ -6,14 +6,17 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from tax_harness.answer_checks import amount_coverage_issue, asserts_pending_proposal, present_bank_result
+from tax_harness.answer_checks import (
+    amount_coverage_issue, asserts_pending_proposal, invoice_mentioned, present_bank_result,
+)
 from tax_harness.app import create_app
 from tax_harness.contracts import BankFilters, ContextBundle, ToolResult
 from tax_harness.model_adapter import (
-    TIMEOUT_MESSAGE, AnswerDecision, ChatCompletionsModel, InvalidDecision, ModelUnavailable, ToolDecision,
+    TIMEOUT_MESSAGE, AnswerDecision, AskDecision, ChatCompletionsModel, InvalidDecision, ModelUnavailable,
+    ToolDecision,
     configured_model,
 )
-from test_agent import ScriptedModel, proposal, read_invoice, seed, send
+from test_agent import HEADERS, PARAMS, ScriptedModel, proposal, read_invoice, seed, send
 
 
 def context():
@@ -153,24 +156,22 @@ def test_fix2_wrapped_tool_call_runs_the_registered_tool(tmp_path):
             assert connection.execute("SELECT count(*) FROM events WHERE kind='tool_result'").fetchone()[0] == 1
 
 
-def test_fix1_timeout_and_openai_compatible_settings(monkeypatch):
-    for key in ("HARNESS_MODEL_ENDPOINT", "HARNESS_MODEL_NAME", "HARNESS_MODEL_KEY",
-                "OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_API_KEY", "HARNESS_MODEL_TIMEOUT"):
+def test_fix1_timeout_keeps_the_existing_harness_settings(monkeypatch):
+    for key in ("HARNESS_MODEL_ENDPOINT", "HARNESS_MODEL_NAME", "HARNESS_MODEL_KEY", "HARNESS_MODEL_TIMEOUT",
+                "OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL"):
         monkeypatch.delenv(key, raising=False)
-    assert configured_model() is None
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.test/v1/")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.test/v1")
     monkeypatch.setenv("OPENAI_MODEL", "qwen-fixture")
     monkeypatch.setenv("OPENAI_API_KEY", "fixture-openai-key")
-    model = configured_model()
-    assert model.endpoint == "https://example.test/v1/chat/completions"
-    assert model.model == "qwen-fixture" and model.timeout == 90
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.test/v1/chat/completions")
+    assert configured_model() is None
     monkeypatch.setenv("HARNESS_MODEL_ENDPOINT", "https://explicit.test/v1/chat/completions")
     monkeypatch.setenv("HARNESS_MODEL_NAME", "explicit-model")
-    monkeypatch.setenv("HARNESS_MODEL_TIMEOUT", "75")
+    monkeypatch.setenv("HARNESS_MODEL_KEY", "fixture-harness-key")
     model = configured_model()
     assert model.endpoint == "https://explicit.test/v1/chat/completions"
-    assert model.model == "explicit-model" and model.key == "fixture-openai-key" and model.timeout == 75
+    assert model.model == "explicit-model" and model.key == "fixture-harness-key" and model.timeout == 90
+    monkeypatch.setenv("HARNESS_MODEL_TIMEOUT", "75")
+    assert configured_model().timeout == 75
 
 
 def income_only_observation():
@@ -254,3 +255,75 @@ def test_fix3_cleared_proposal_cannot_be_described_as_still_pending(tmp_path):
         assert answered["reply"] == "本轮没有待确认的修改。"
         assert answered["pending_items"] == [] and "旧提案" not in answered["reply"]
         assert read_invoice(client)["purpose"] is None
+
+
+def seed_second_invoice(app):
+    seed(app)
+    with app.state.database.write() as connection:
+        connection.execute(
+            "INSERT INTO invoices(enterprise_id,invoice_id,invoice_date,seller,item_name,amount_cents) "
+            "VALUES ('C001','F002','2026-09-02','供方','培训资料',20000)"
+        )
+
+
+def propose_f002(purpose="培训资料打印"):
+    return ToolDecision(kind="tool", name="propose_invoice_update",
+                        arguments={"invoice_id": "F002", "patch": {"purpose": purpose}})
+
+
+def test_fix4_query_results_do_not_authorize_an_unnamed_invoice(tmp_path):
+    assert invoice_mentioned("请改 F002。", "F002")
+    assert invoice_mentioned("请改 f002", "F002")
+    assert not invoice_mentioned("请改 F0020 的用途", "F002")
+    model = ScriptedModel(
+        ToolDecision(kind="tool", name="list_invoices", arguments={}),
+        propose_f002(),
+    )
+    app = create_app(tmp_path / "unnamed.sqlite3", model=model)
+    with TestClient(app) as client:
+        seed_second_invoice(app)
+        response = send(client, "b34", "帮我把其中一张的用途补成培训资料打印").json()
+        assert "发票编号" in response["reply"] and "确认保存" not in response["reply"]
+        assert response["task_status"] == "waiting_user" and response["pending_items"] == [response["reply"]]
+        assert response["operation_ids"] == []
+        invoice = client.get("/api/invoices/F002", params=PARAMS, headers=HEADERS).json()["data"]
+        assert invoice["purpose"] is None and invoice["revision"] == 1
+        with app.state.database.connect() as connection:
+            kinds = {row[0] for row in connection.execute("SELECT kind FROM events")}
+            assert "proposal_target_rejected" in kinds and "save_proposal" not in kinds
+
+
+def test_fix4_user_history_or_confirmed_target_allows_the_proposal(tmp_path):
+    model = ScriptedModel(
+        AskDecision(kind="ask", reply="请说明用途。"),
+        propose_f002(),
+        AskDecision(kind="ask", reply="请补充备注内容。"),
+        ToolDecision(kind="tool", name="propose_invoice_update",
+                     arguments={"invoice_id": "F002", "patch": {"note": "票据已核对"}}),
+    )
+    app = create_app(tmp_path / "named.sqlite3", model=model)
+    with TestClient(app) as client:
+        seed_second_invoice(app)
+        assert send(client, "name", "我想改 F002").json()["task_status"] == "waiting_user"
+        proposed = send(client, "purpose", "用途写培训资料打印").json()
+        assert "确认保存" in proposed["reply"] and "F002" in proposed["reply"]
+        assert client.get("/api/invoices/F002", params=PARAMS, headers=HEADERS).json()["data"]["purpose"] is None
+        assert send(client, "cancel", "取消保存").json()["reply"].startswith("已取消")
+        asked = send(client, "again", "再补一张票", session="s2").json()
+        detail = client.get(f"/api/tasks/{asked['task_id']}", params=PARAMS, headers=HEADERS).json()
+        bound = client.patch(f"/api/tasks/{asked['task_id']}", params=PARAMS, headers=HEADERS,
+                             json={"expected_revision": detail["revision"], "object_id": "F002"})
+        assert bound.status_code == 200 and bound.json()["object_id"] == "F002"
+        confirmed = send(client, "note", "备注写成票据已核对", session="s2").json()
+        assert "确认保存" in confirmed["reply"] and "F002" in confirmed["reply"]
+        assert "F0020" not in confirmed["reply"]
+
+
+def test_fix4_longer_identifier_does_not_count_as_the_target(tmp_path):
+    model = ScriptedModel(propose_f002())
+    app = create_app(tmp_path / "boundary.sqlite3", model=model)
+    with TestClient(app) as client:
+        seed_second_invoice(app)
+        response = send(client, "near", "请改 F0020 的用途为培训资料打印").json()
+        assert "发票编号" in response["reply"] and "确认保存" not in response["reply"]
+        assert client.get("/api/invoices/F002", params=PARAMS, headers=HEADERS).json()["data"]["purpose"] is None

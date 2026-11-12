@@ -7,7 +7,9 @@ from uuid import uuid4
 
 from .access import authorize
 from .agent_tools import TOOL_INPUTS
-from .answer_checks import present_bank_result, reply_consistency_issue
+from .answer_checks import (
+    UNNAMED_INVOICE_QUESTION, inconsistent_reply, record_bank_observation, user_invoice_history, user_named_invoice,
+)
 from .business_writes import UNRESOLVED, VerificationFailure
 from .context import ContextBudgetExceeded, SqliteContextBuilder, encoded, rule_ref
 from .contracts import (
@@ -202,12 +204,11 @@ class TurnExecutor:
                 results.append(failed_tool("invalid_argument", str(exc)))
                 continue
             self.event(turn.task_id, "model_decision", decision.model_dump(mode="json"))
-            if isinstance(decision, (AnswerDecision, AskDecision)):
-                issue = reply_consistency_issue(decision.reply, observations)
-                if issue:
-                    self.event(turn.task_id, "reply_rejected", {"message": issue})
-                    results.append(failed_tool("invalid_argument", issue))
-                    continue
+            issue = inconsistent_reply(decision, observations)
+            if issue:
+                self.event(turn.task_id, "reply_rejected", {"message": issue})
+                results.append(failed_tool("invalid_argument", issue))
+                continue
             if isinstance(decision, AnswerDecision):
                 available = set(context.sources)
                 citations = {encoded(rule.citation.model_dump()): rule_ref(rule)
@@ -230,10 +231,8 @@ class TurnExecutor:
                 arguments = definition[0].model_validate(decision.arguments)
                 if decision.name == "propose_invoice_update":
                     return self.propose(turn, request, arguments, context.sources)
-                result = self.run_read_tool(turn.scope, decision.name, arguments)
-                if decision.name == "list_bank_transactions":
-                    observations.append({"arguments": arguments.model_dump(), "result": result})
-                    result = present_bank_result(arguments, result)
+                result = record_bank_observation(
+                    observations, decision.name, arguments, self.run_read_tool(turn.scope, decision.name, arguments))
             except PermissionError:
                 result = failed_tool("forbidden", "当前用户无权执行此操作。")
             except KeyError:
@@ -265,6 +264,11 @@ class TurnExecutor:
             return Outcome("该企业还有其他月份的未完成任务，请先处理原任务。")
         if turn.object_id is not None and turn.object_id != arguments.invoice_id:
             raise ValueError("修改目标与任务绑定的发票不一致。")
+        history = user_invoice_history(self.database, turn.scope)
+        if not user_named_invoice(turn.object_id, request.text, arguments.invoice_id, history):
+            turn.state["question"] = UNNAMED_INVOICE_QUESTION
+            self.event(turn.task_id, "proposal_target_rejected", {"invoice_id": arguments.invoice_id})
+            return Outcome(UNNAMED_INVOICE_QUESTION)
         with self.database.connect() as connection:
             authorize(connection, turn.scope, write=True)
         record = self.reader.get_record(turn.scope, arguments.invoice_id).data
