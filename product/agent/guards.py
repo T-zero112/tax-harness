@@ -201,6 +201,8 @@ def proposal_claim(decision, events, evidence=()):
     # A verified operation read can prove an existing save; it does not prove a new proposal this turn.
     saved = any(p.get("tool")=="get_operation" and p.get("result",{}).get("status")=="succeeded" and p.get("result",{}).get("data",{}).get("operation",{}).get("state")=="confirmed" for p in evidence)
     existing_save = saved and bool(re.search(r"保存|写入|更新",text)) and not re.search(r"生成|提交|创建|准备好",text)
-    if (getattr(decision, "claims_proposal", False) or completion) and not real and not existing_save:
+    if getattr(decision,"claims_proposal",False) and not real:
+        return "proposal_claim_without_event"
+    if completion and not real and not existing_save:
         return "proposal_claim_without_event"
     return None
