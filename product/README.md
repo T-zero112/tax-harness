@@ -267,3 +267,37 @@ Edge 必须信任该副本用于 localhost 的 CA；脚本不忽略 TLS 错误�
 详细检查与截图见 [P7 验收记录](P7验收记录.md)。完整 B01—B35 真实模型复验、模型动作稳定性修复与视频发布包仍属于后续阶段。
 
 恢复脚本若报独立服务未就绪，先查看具体 Docker 错误。若源容器的 Image ID 已不存在，在独立验收实例的静默窗口用相同 Compose 配置执行 `up -d --no-deps --force-recreate --wait importer worker`，再重跑原恢复脚本；不要修改其内容一致性检查。P7 本轮遇到并修复了这一镜像引用问题。
+
+## P8 外部真实模型复验入口
+
+千问AI平台按量付费 Key 的文本对话配置示例（Key 只写本地 .env）：
+
+```dotenv
+PRODUCT_MODEL_BASE_URL=https://maas.qianwenaiapi.com/compatible-mode/v1
+PRODUCT_MODEL_NAME=qwen3.8-max
+PRODUCT_MODEL_API_KEY=
+PRODUCT_MODEL_STRUCTURED=schema
+PRODUCT_MODEL_TIMEOUT=120
+PRODUCT_CONTEXT_BUDGET=24000
+```
+
+该地址来源于千问AI平台文档 https://platform.qianwenai.com/docs/api-reference/preparation/api-key ，适用于该平台按量付费文本对话。其他地域、Token Plan 或百炼入口应以其配套 Base URL 为准，不能只凭模型名混用 Key。以上配置不包含“官方赛事模型已经验收”的承诺。
+
+在一份独立产品源码副本中，使用全新合成数据启动，不指向主工作台：
+
+```powershell
+$env:COMPOSE_PROJECT_NAME = 'tax-product-p8'
+$env:PRODUCT_IMPORTER_IMAGE = 'tax-product-p8-importer'
+$env:PRODUCT_HTTP_PORT = '13112'
+$env:PRODUCT_HTTPS_PORT = '13451'
+# 在该副本 product/.env 填写模型配置，保留该副本独立的数据库、会话和账号凭据。
+powershell -ExecutionPolicy Bypass -File product/start.ps1 -Https
+docker compose -f product/compose.yaml -f product/compose.https.yaml -f product/compose.external-acceptance.yaml up -d --wait
+$env:PRODUCT_TEST_BASE = 'https://localhost:13451'
+$env:SSL_CERT_FILE = (Resolve-Path product/tls/local/ca.crt).Path
+python product/verify_external.py --rounds 3
+```
+
+`verify_external.py` 只接受 tax-product-p8 前缀实例，当前固定核对 qwen3.8-max。覆盖既有 B24-01/02/03/04、B34-A/C 主流程三轮，以及一次 P6 的追问、偏好新增/更正、Agent 重启和删除后的上下文核对；提案成功后由验收客户端显式确认，并验证同键重放、回查和同号隔离。不是完整的 verify_bcases.py，也没有实现 v1.1.0 等价 fixture、模型 profile 解析或程序自动收尾。
+
+结果、SSE、脱敏原始模型响应存于副本 data/p8-live-qwen3.8-max-时间/。失败返回非零退出码，不能将连接成功代替任务通过。使用真实按量付费服务会产生实际模型调用费用；本脚本最多三轮，失败按实际记录。数据范围和结果见 [P8 验收记录](P8验收记录.md)。

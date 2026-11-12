@@ -1,0 +1,4 @@
+services:
+  agent:
+    environment:
+      PRODUCT_AGENT_EVIDENCE_DIR: /embedding-cache/p8-live-evidence
