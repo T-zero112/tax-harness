@@ -7,6 +7,9 @@ from uuid import uuid4
 
 from .access import authorize
 from .agent_tools import TOOL_INPUTS
+from .answer_checks import (
+    UNNAMED_INVOICE_QUESTION, inconsistent_reply, record_bank_observation, user_invoice_history, user_named_invoice,
+)
 from .business_writes import UNRESOLVED, VerificationFailure
 from .context import ContextBudgetExceeded, SqliteContextBuilder, encoded, rule_ref
 from .contracts import (
@@ -42,6 +45,7 @@ class Outcome:
     operation_ids: list[str] = field(default_factory=list)
     blocked: bool = False
     failed: bool = False
+    model_unavailable: bool = False
 
 
 def failed_tool(code, message) -> ToolResult:
@@ -171,7 +175,7 @@ class TurnExecutor:
                 outcome = Outcome(str(exc), failed=True)
             except ModelUnavailable as exc:
                 self.event(turn.task_id, "model_unavailable", {"message": str(exc)})
-                outcome = Outcome(str(exc), failed=True)
+                outcome = Outcome(str(exc), failed=True, model_unavailable=True)
             except (PermissionError, sqlite3.Error):
                 outcome = Outcome("本轮无法读取业务资料，请检查权限或数据服务。", failed=True)
             if turn.state.get("proposal") is previous_proposal:
@@ -185,6 +189,7 @@ class TurnExecutor:
 
     def run_model(self, turn: Turn, request: MessageRequest, text: str) -> Outcome:
         results = []
+        observations = []
         for _ in range(6):
             context = self.context.build(ContextRequest(
                 scope=turn.scope, task_id=turn.task_id, task_revision=turn.revision,
@@ -199,6 +204,11 @@ class TurnExecutor:
                 results.append(failed_tool("invalid_argument", str(exc)))
                 continue
             self.event(turn.task_id, "model_decision", decision.model_dump(mode="json"))
+            issue = inconsistent_reply(decision, observations)
+            if issue:
+                self.event(turn.task_id, "reply_rejected", {"message": issue})
+                results.append(failed_tool("invalid_argument", issue))
+                continue
             if isinstance(decision, AnswerDecision):
                 available = set(context.sources)
                 citations = {encoded(rule.citation.model_dump()): rule_ref(rule)
@@ -221,7 +231,8 @@ class TurnExecutor:
                 arguments = definition[0].model_validate(decision.arguments)
                 if decision.name == "propose_invoice_update":
                     return self.propose(turn, request, arguments, context.sources)
-                result = self.run_read_tool(turn.scope, decision.name, arguments)
+                result = record_bank_observation(
+                    observations, decision.name, arguments, self.run_read_tool(turn.scope, decision.name, arguments))
             except PermissionError:
                 result = failed_tool("forbidden", "当前用户无权执行此操作。")
             except KeyError:
@@ -253,6 +264,11 @@ class TurnExecutor:
             return Outcome("该企业还有其他月份的未完成任务，请先处理原任务。")
         if turn.object_id is not None and turn.object_id != arguments.invoice_id:
             raise ValueError("修改目标与任务绑定的发票不一致。")
+        history = user_invoice_history(self.database, turn.scope)
+        if not user_named_invoice(turn.object_id, request.text, arguments.invoice_id, history):
+            turn.state["question"] = UNNAMED_INVOICE_QUESTION
+            self.event(turn.task_id, "proposal_target_rejected", {"invoice_id": arguments.invoice_id})
+            return Outcome(UNNAMED_INVOICE_QUESTION)
         with self.database.connect() as connection:
             authorize(connection, turn.scope, write=True)
         record = self.reader.get_record(turn.scope, arguments.invoice_id).data
@@ -408,6 +424,8 @@ class TurnExecutor:
                 elif turn.state.get("question"):
                     status = TaskStatus.WAITING_USER
                     pending.append(turn.state["question"])
+                elif outcome.model_unavailable:
+                    status = TaskStatus.RUNNING
                 else:
                     status = TaskStatus.COMPLETED
                 connection.execute("UPDATE tasks SET status=?,state_json=?,revision=revision+1 WHERE task_id=?",

@@ -21,7 +21,7 @@ class OperationLookup(Contract):
 
 TOOL_INPUTS = {
     "list_invoices": (InvoiceFilters, "查询当前范围发票和发票总额"),
-    "list_bank_transactions": (BankFilters, "查询当前范围流水并分别汇总收入和支出"),
+    "list_bank_transactions": (BankFilters, "查询当前范围流水。不筛选方向时同时覆盖收入和支出；筛选单一方向时另一方向没有全月金额"),
     "get_invoice": (InvoiceLookup, "按编号读取当前范围发票"),
     "check_invoice_purposes": (InvoiceFilters, "按材料包现行规则检查发票用途并返回实际缺项"),
     "search_rules": (RuleQuery, "检索当前企业及月份适用的规则"),

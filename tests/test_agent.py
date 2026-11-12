@@ -138,7 +138,7 @@ def test_intervening_model_failure_invalidates_unconfirmed_proposal(tmp_path):
     app = create_app(tmp_path / "timeout.sqlite3", model=model)
     with TestClient(app) as client:
         seed(app)
-        assert "确认保存" in send(client, "propose", "请将用途改为办公资料").json()["reply"]
+        assert "确认保存" in send(client, "propose", "请将 F001 用途改为办公资料").json()["reply"]
         assert "超时" in send(client, "change", "改为差旅").json()["reply"]
         assert send(client, "confirm", "确认保存").json()["operation_ids"] == []
         assert read_invoice(client)["purpose"] is None

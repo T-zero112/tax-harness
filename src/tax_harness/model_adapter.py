@@ -6,6 +6,7 @@ import httpx
 from pydantic import Field, TypeAdapter
 
 from .contracts import Citation, ContextBundle, Contract, Identifier
+from .model_io import MAX_DECISION_RETRIES, TIMEOUT_MESSAGE, parse_decision_content, read_model_content
 
 
 class ToolDecision(Contract):
@@ -43,27 +44,19 @@ class InvalidDecision(ValueError):
 
 
 class ChatCompletionsModel:
-    def __init__(self, endpoint: str, model: str, key: str, *, timeout: float = 25,
-                 transport: httpx.BaseTransport | None = None):
+    def __init__(self, endpoint: str, model: str, key: str, *, timeout: float = 90,
+                 transport: httpx.BaseTransport | None = None, retries: int = MAX_DECISION_RETRIES):
+        if retries < 0 or retries > MAX_DECISION_RETRIES:
+            raise ValueError("model decision retries must be 0 or 1")
         self.endpoint = endpoint
         self.model = model
         self.key = key
         self.timeout = timeout
         self.transport = transport
+        self.retries = retries
 
     def decide(self, context: ContextBundle) -> Decision:
-        try:
-            with httpx.Client(timeout=self.timeout, transport=self.transport) as client:
-                response = client.post(self.endpoint, headers={"Authorization": f"Bearer {self.key}"},
-                                       json={"model": self.model, "messages": context.messages})
-                response.raise_for_status()
-        except (httpx.HTTPError, httpx.InvalidURL) as exc:
-            raise ModelUnavailable("模型请求失败或超时，请稍后重试。") from exc
-        try:
-            content = response.json()["choices"][0]["message"]["content"]
-            return DECISION.validate_json(content)
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise InvalidDecision("模型返回的动作格式无效。") from exc
+        return parse_decision_content(read_model_content(self, context))
 
 
 def configured_model() -> ChatCompletionsModel | None:
@@ -72,7 +65,7 @@ def configured_model() -> ChatCompletionsModel | None:
     key = os.getenv("HARNESS_MODEL_KEY", "").strip()
     if not all((endpoint, model, key)):
         return None
-    timeout = float(os.getenv("HARNESS_MODEL_TIMEOUT", "25"))
+    timeout = float(os.getenv("HARNESS_MODEL_TIMEOUT", "90"))
     if not isfinite(timeout) or timeout <= 0:
         raise ValueError("HARNESS_MODEL_TIMEOUT must be a positive number of seconds")
     return ChatCompletionsModel(endpoint, model, key, timeout=timeout)

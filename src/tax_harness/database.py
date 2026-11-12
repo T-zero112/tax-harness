@@ -26,6 +26,7 @@ class Database:
         with self.mutation_lock, self.connect() as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version == 1:
+                ensure_superseded_memory_column(connection)
                 return
             if version != 0:
                 raise RuntimeError(f"unsupported database schema version {version}")
@@ -41,3 +42,9 @@ class Database:
             except BaseException:
                 connection.rollback()
                 raise
+
+
+def ensure_superseded_memory_column(connection) -> None:
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(memory_invalidations)")}
+    if "superseded_content" not in columns:
+        connection.execute("ALTER TABLE memory_invalidations ADD COLUMN superseded_content TEXT")
