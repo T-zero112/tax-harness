@@ -89,3 +89,14 @@ class ModelTelemetry(unittest.TestCase):
             with patch.dict(os.environ,settings),patch.object(m.httpx,"Client",return_value=client):
                 with self.assertRaises(ValueError):m.decide([],record)
             self.assertEqual(record["error_code"],"model_invalid_output")
+
+
+    def test_provider_schema_keeps_proposal_field_allowlist(self):
+        import model_adapter as m,json
+        schema=m.decision_schema()
+        self.assertNotIn("propertyNames",json.dumps(schema))
+        changes=schema["$defs"]["ProposeDecision"]["properties"]["arguments"]["properties"]["changes"]
+        self.assertEqual(set(changes["properties"]),{"purpose","note"})
+        self.assertFalse(changes["additionalProperties"])
+        self.assertEqual(changes["minProperties"],1)
+        for value in changes["properties"].values():self.assertEqual(value["maxLength"],500)

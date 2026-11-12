@@ -56,16 +56,24 @@ DECISION = TypeAdapter(Annotated[ToolDecision | AskDecision | AnswerDecision | P
 def decision_schema(registered=False):
     from copy import deepcopy
     from tools import TOOLS, Proposal
+    def arguments_schema(model):
+        result=model.model_json_schema()
+        if model is Proposal:
+            # Equivalent key allowlist without provider-rejected propertyNames.
+            result["properties"]["changes"]={"type":"object","properties":{
+                key:{"type":"string","minLength":1,"maxLength":500} for key in ("purpose","note")},
+                "additionalProperties":False,"minProperties":1,"maxProperties":2}
+        return result
     schema=DECISION.json_schema()
     common=schema["$defs"]["ToolDecision"]
     variants=[]
     for name,arguments in TOOLS.items():
         branch=deepcopy(common)
         branch["properties"]["tool"]={"const":name,"type":"string"}
-        branch["properties"]["arguments"]=arguments.model_json_schema()
+        branch["properties"]["arguments"]=arguments_schema(arguments)
         variants.append(branch)
     schema["$defs"]["ToolDecision"]={"oneOf":variants}
-    schema["$defs"]["ProposeDecision"]["properties"]["arguments"]=Proposal.model_json_schema()
+    schema["$defs"]["ProposeDecision"]["properties"]["arguments"]=arguments_schema(Proposal)
     if registered:
         def strip(node):
             if isinstance(node,dict):
