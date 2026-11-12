@@ -84,7 +84,8 @@ def wait_for(check):
 
 def main():
     stamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d-%H%M%S")
-    tag = "p4-restore-" + uuid4().hex[:10]
+    project=os.environ.get("COMPOSE_PROJECT_NAME", "")
+    tag = ("tax-product-p8-restore-" if project.startswith("tax-product-p8") else "p4-restore-") + uuid4().hex[:10]
     output = ROOT / "data" / "product-backups" / f"{stamp}-{tag}"
     output.mkdir(parents=True)
     source_db, source_objects, source_importer = [

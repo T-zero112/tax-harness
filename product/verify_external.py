@@ -1,5 +1,5 @@
 """Real-model smoke acceptance on disposable P8 product seed data, not B01-B35 certification."""
-import argparse,json,os,subprocess,time
+import argparse,json,os,subprocess,time,hashlib
 from pathlib import Path
 from uuid import uuid4
 from urllib.parse import urlsplit
@@ -10,8 +10,9 @@ BASE='/api/enterprises/C001/chat'
 
 def run(rounds):
     assert os.getenv('COMPOSE_PROJECT_NAME','').startswith('tax-product-p8'),'Use disposable tax-product-p8 instance'
+    files=['-f',str(ROOT/'compose.yaml'),'-f',str(ROOT/'compose.https.yaml'),'-f',str(ROOT/'compose.external-acceptance.yaml')]
     target=urlsplit(v.BASE)
-    published=subprocess.check_output(m.COMPOSE+['port','gateway','443']).decode().strip().rsplit(':',1)[-1]
+    published=subprocess.check_output(m.COMPOSE+files+['port','gateway','443']).decode().strip().rsplit(':',1)[-1]
     if target.scheme!='https' or target.hostname not in ('localhost','127.0.0.1') or target.port==3443 or str(target.port)!=published:
         raise RuntimeError('Acceptance URL must match this P8 gateway, never main 3443')
     actual=json.loads(subprocess.check_output(m.COMPOSE+['exec','-T','agent','python','-c',"import os,json; print(json.dumps({'model':os.environ.get('PRODUCT_MODEL_NAME'),'evidence_dir':os.environ.get('PRODUCT_AGENT_EVIDENCE_DIR')}))"]))
@@ -19,7 +20,27 @@ def run(rounds):
     cfg=dict(s.split('=',1) for s in (ROOT/'.env').read_text(encoding='utf-8-sig').splitlines() if '=' in s and not s.startswith('#'))
     out=ROOT.parent/'data'/('p8-live-qwen3.8-max-'+time.strftime('%Y%m%d-%H%M%S'));out.mkdir(parents=True)
     report={'model':actual['model'],'dataset':'synthetic product seed; not v1.1.0-equivalent fixture','results':[]}
-    alpha=v.login('alpha');beta=v.login('beta')
+    fixture=Path(os.environ['PRODUCT_P8_INITIAL_DUMP'])
+    initial=fixture.read_bytes()
+    report['initial_dump_sha256']=hashlib.sha256(initial).hexdigest()
+    report['round_resets']=[]
+    source_files=sorted(p for p in (ROOT/'agent').glob('*.py') if '__pycache__' not in str(p))
+    report['agent_source_sha256']=hashlib.sha256(b''.join(p.name.encode()+p.read_bytes() for p in source_files)).hexdigest()
+    runtime_hash=subprocess.check_output(m.COMPOSE+['exec','-T','agent','python','-c',"from pathlib import Path;import hashlib;print(hashlib.sha256(b''.join(p.name.encode()+p.read_bytes() for p in sorted(Path('/app').glob('*.py')))).hexdigest())"]).decode().strip()
+    assert runtime_hash==report['agent_source_sha256'],'Running agent differs from accepted source'
+    report['runtime_agent_sha256']=runtime_hash
+    report['source_git_commit']=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT).decode().strip() if (ROOT.parent/'.git').exists() else os.environ.get('PRODUCT_SOURCE_COMMIT','unrecorded')
+    def reset_round(n):
+        subprocess.run(m.COMPOSE+files+['stop','business','agent','worker'],check=True,stdout=subprocess.DEVNULL)
+        subprocess.run(m.COMPOSE+['exec','-T','db','pg_restore','-U','tax_product','-d','tax_product','--clean','--if-exists','--no-owner','--exit-on-error'],input=initial,check=True,stdout=subprocess.DEVNULL)
+        subprocess.run(m.COMPOSE+['exec','-T','redis','redis-cli','FLUSHDB'],check=True,stdout=subprocess.DEVNULL)
+        subprocess.run(m.COMPOSE+files+['up','-d','--no-deps','--wait','business','agent','worker'],check=True,stdout=subprocess.DEVNULL)
+        snapshot=subprocess.check_output(m.COMPOSE+['exec','-T','db','psql','-U','tax_product','-d','tax_product','-At','-c',"select jsonb_build_object('invoices',(select jsonb_agg(to_jsonb(i) order by tenant_id,enterprise_id,invoice_id) from product_invoice i),'proposals',(select count(*) from invoice_proposal),'tasks',(select count(*) from agent_task))"])
+        (out/f'round{n}-initial-state.json').write_bytes(snapshot)
+        digest=hashlib.sha256(snapshot).hexdigest()
+        if report['round_resets']:assert digest==report['round_resets'][0]['state_sha256'],'Round start state differs'
+        report['round_resets'].append({'round':n,'state_sha256':digest,'dump_sha256':report['initial_dump_sha256']})
+    alpha=beta=None
     def call(path,body=None,expected=200,headers=None,method=None):return json.loads(v.request(alpha,path,body,expected,headers,method) or 'null')
     def cleanup():
         active=call(BASE+'/tasks/active?period=2026-09')
@@ -28,6 +49,7 @@ def run(rounds):
             row=call(BASE+'/tasks/active?period=2026-09')['task']
             if row:call(BASE+'/tasks/'+row['task_id']+'/cancel',{'expected_revision':row['revision']})
     def turn(name,text,session):
+        started=time.monotonic()
         row={'case':name,'input':text}
         try:
             raw=v.request(alpha,BASE,{'session_id':session,'period':'2026-09','message':text})
@@ -38,15 +60,23 @@ def run(rounds):
                 lines=frame.splitlines();event=next((x[7:] for x in lines if x.startswith('event: ')),None);data=next((x[6:] for x in lines if x.startswith('data: ')),None)
                 if event and data:events.append({'event':event,'data':json.loads(data)})
             row['events']=events
+            done=next((e['data'] for e in reversed(events) if e['event']=='done'),{})
+            if done.get('task_id'):
+                traces=call(BASE+'/tasks/'+done['task_id']+'/traces')
+                row['trace']=next((t['summary'] for t in reversed(traces) if t['turn_id']==done.get('turn_id')),traces[-1]['summary'] if traces else {})
         except Exception as error:row['error_type']=type(error).__name__;events=[]
+        row['wall_duration_ms']=int((time.monotonic()-started)*1000)
         return row,events
     def save(row,passed):
-        row['status']='passed' if passed else 'failed';row['completion']='model' if passed else 'failed'
+        row['status']='passed' if passed else 'failed';row['completion']=('program' if any(e['event']=='answer' and e['data'].get('rendered_by')=='program' for e in row.get('events',[])) else 'model') if passed else 'failed'
+        row['token_usage']={k:sum(c.get('usage',{}).get(k,0) for c in row.get('trace',{}).get('model_calls',[])) for k in ('prompt_tokens','completion_tokens','total_tokens')}
+        row['model_call_duration_ms']=[c['duration_ms'] for c in row.get('trace',{}).get('model_calls',[])]
         (out/(row['case']+'.json')).write_text(json.dumps(row,ensure_ascii=False,indent=2),encoding='utf-8')
         report['results'].append({'case':row['case'],'status':row['status'],'completion':row['completion']})
         (out/'summary.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
         print(row['case'],row['status'],flush=True)
     for n in range(1,rounds+1):
+        reset_round(n)
         alpha=v.login('alpha');beta=v.login('beta')
         cleanup();session=str(uuid4())
         scenarios=[('B24-01','请汇总本月发票合计、银行收入、银行支出，并给出用途填写的规则依据。'),('B24-02','检查 F001 的用途和备注，有缺项先问我。'),('B24-03','先查本月银行收入，再继续刚才的 F001 补全。'),('B24-04','F001 用途填测试用途，备注填测试补全，请生成建议供我确认。'),('B34-A','我刚才说的发票是 F001，请把备注建议改成测试补全，等我确认。'),('B34-C','还是 F001，先不要保存，告诉我现在有没有保存。')]
@@ -93,8 +123,17 @@ def run(rounds):
         call(BASE+'/memories/'+pref['memory_id'],{'expected_revision':2},method='DELETE')
         row,events=turn('P6-B10-deleted','请说明下一步。',session);task_id=events[-1]['data'].get('task_id') if events else None;context=context_for(task_id) if task_id else {}
         save(row,bool(context and all(p['memory_id']!=pref['memory_id'] for p in context.get('memories',[])) and all(m['message_id']!=source for m in context.get('history',[]))))
-    subprocess.run(['docker','cp','tax-product-p8-agent-1:'+actual['evidence_dir'],str(out/'raw-model')],check=True)
-    cleanup();report['passed']=sum(r['status']=='passed' for r in report['results']);report['failed']=sum(r['status']=='failed' for r in report['results']);report['program_fallback']=0
+    container=subprocess.check_output(m.COMPOSE+['ps','-q','agent']).decode().strip()
+    subprocess.run(['docker','cp',container+':'+actual['evidence_dir'],str(out/'raw-model')],check=True)
+    cleanup();report['passed']=sum(r['status']=='passed' for r in report['results']);report['failed']=sum(r['status']=='failed' for r in report['results']);report['program_fallback']=sum(r['completion']=='program' for r in report['results'])
+    report['usage']={k:0 for k in ('prompt_tokens','completion_tokens','total_tokens')}
+    report['model_calls']=0;report['usage_missing_calls']=0
+    for path in out.glob('round*.json'):
+        for call_record in json.loads(path.read_text(encoding='utf-8')).get('trace',{}).get('model_calls',[]):
+            report['model_calls']+=1
+            report['usage_missing_calls']+=int('total_tokens' not in call_record.get('usage',{}))
+            for k in report['usage']:report['usage'][k]+=call_record.get('usage',{}).get(k,0)
+    report['six_case_counts']={kind:sum(r['completion']==kind for r in report['results'] if r['case'].startswith('round')) for kind in ('model','program','failed')}
     (out/'summary.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8');print('P8_EXTERNAL_EVIDENCE',str(out),report['passed'],report['failed'],flush=True)
     return 0 if not report['failed'] else 1
 if __name__=='__main__':

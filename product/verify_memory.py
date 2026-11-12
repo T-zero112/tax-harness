@@ -48,7 +48,14 @@ def serve():
             with mutex: captures.append(payload)
             current=json.loads(payload["messages"][-1]["content"])
             text=current["message"]
-            if "case=p6_delay" in text or "case=p6_lease" in text:
+            if "case=p8_operation" in text:
+                evidence=current["evidence"]
+                known=next((x for x in current.get("recent_operations",[]) if x["invoice_id"]=="F001"),None)
+                if not known:decision={"kind":"ask","message":"没有可核实的操作编号，请提供保存记录。"}
+                elif not evidence:decision={"kind":"tool","tool":"get_operation","arguments":{"invoice_id":"F001","proposal_id":str(known["proposal_id"])}}
+                else:decision={"kind":"answer","message":"依据本轮操作记录核实。","answer_items":[{"requirement_id":r["requirement_id"],"evidence_ids":[evidence[-1]["evidence_id"]],"value_key":"operation"} for r in current["requirements"]]}
+                content=json.dumps(decision,ensure_ascii=False)
+            elif "case=p6_delay" in text or "case=p6_lease" in text:
                 time.sleep(34 if "case=p6_lease" in text else 3)
                 content=json.dumps({"kind":"ask","message":"请继续提供 "+(current.get("pending_invoice") or "目标发票")+" 的用途和备注。"})
             elif "case=p6_readonly_proposal" in text:
@@ -156,7 +163,8 @@ def fixtures(alpha):
 
 
 def verify():
-    assert os.getenv("COMPOSE_PROJECT_NAME","").startswith("tax-product-p6"),"Use a disposable P6 Compose project"
+    v.require_p8_target()
+    assert os.getenv("COMPOSE_PROJECT_NAME","").startswith(("tax-product-p6","tax-product-p8")),"Use a disposable P6 Compose project"
     alpha,beta=v.login("alpha"),v.login("beta")
     leftover=active(alpha)
     if leftover.get("task"):

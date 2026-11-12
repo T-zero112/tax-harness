@@ -262,7 +262,7 @@ python product/verify_ui.py
 
 Edge 必须信任该副本用于 localhost 的 CA；脚本不忽略 TLS 错误。复用本机已受信任的开发服务证书时，仅在被 Git 忽略的测试证书目录操作，不能提交证书私钥。UI 脚本会更改合成数据、模拟并发版本冲突、使测试会话过期，并临时切换 Agent 为未配置模型后恢复；不得对主工作台运行。
 
-结果和 1440×900、390×844 截图输出到副本 `data/p7-ui-时间/`。脚本包含真实浏览器点击、真实业务写入、独立回查和同键重放，模型仍是替身。其后执行 verify_https/access、verify.py、verify.py --p3、verify_import/bank、verify_agent.py --details、verify_restore.py。未改动的 verify_memory.py 有 tax-product-p6 项目名保护，应在另一份采用同一 P7 源码的独立 tax-product-p6 实例运行，不要修改该保护来适配 P7。
+结果和 1440×900、390×844 截图输出到副本 `data/p7-ui-时间/`。脚本包含真实浏览器点击、真实业务写入、独立回查和同键重放，模型仍是替身。其后执行 verify_https/access、verify.py、verify.py --p3、verify_import/bank、verify_agent.py --details、verify_restore.py。P8 修复验收允许 verify_memory.py 与 verify_ui.py 接受 tax-product-p8 前缀；原 P6/P7 前缀仍受支持。P8 额外核对实际 HTTPS 网关端口，拒绝 3443，不改变任何业务断言。
 
 详细检查与截图见 [P7 验收记录](P7验收记录.md)。完整 B01—B35 真实模型复验、模型动作稳定性修复与视频发布包仍属于后续阶段。
 
@@ -295,9 +295,22 @@ powershell -ExecutionPolicy Bypass -File product/start.ps1 -Https
 docker compose -f product/compose.yaml -f product/compose.https.yaml -f product/compose.external-acceptance.yaml up -d --wait
 $env:PRODUCT_TEST_BASE = 'https://localhost:13451'
 $env:SSL_CERT_FILE = (Resolve-Path product/tls/local/ca.crt).Path
+# 必须先在干净初始化且未运行写入测试时，使用 pg_dump -Fc 保存该 P8 数据库。
+# 二进制备份通过 Python subprocess 写入，避免 PowerShell 文本重编码。
+$env:PRODUCT_P8_INITIAL_DUMP = '此隔离实例的初始数据库绝对路径.dump'
+$env:PRODUCT_SOURCE_COMMIT = (git rev-parse HEAD)
 python product/verify_external.py --rounds 3
 ```
 
 `verify_external.py` 只接受 tax-product-p8 前缀实例，当前固定核对 qwen3.8-max。覆盖既有 B24-01/02/03/04、B34-A/C 主流程三轮，以及一次 P6 的追问、偏好新增/更正、Agent 重启和删除后的上下文核对；提案成功后由验收客户端显式确认，并验证同键重放、回查和同号隔离。不是完整的 verify_bcases.py，也没有实现 v1.1.0 等价 fixture、模型 profile 解析或程序自动收尾。
 
 结果、SSE、脱敏原始模型响应存于副本 data/p8-live-qwen3.8-max-时间/。失败返回非零退出码，不能将连接成功代替任务通过。使用真实按量付费服务会产生实际模型调用费用；本脚本最多三轮，失败按实际记录。数据范围和结果见 [P8 验收记录](P8验收记录.md)。
+
+
+### P8 R4 统一起点与证据边界
+
+每轮停止本实例 business/agent/worker，从同一个 `PRODUCT_P8_INITIAL_DUMP` 恢复 PostgreSQL，清空本实例 Redis 后重启并重新登录。三轮开始状态哈希必须一致；不得使用主库备份或向 3443 发起验收请求。模型运行代码的 SHA-256 必须与隔离副本源码一致。原件存储和模型缓存不由六项对话用例修改，三轮共用同一副本。
+
+新目录保存每个 case 的 SSE、轨迹、单次模型调用耗时、整轮耗时、token 用量和每轮起点哈希。`model_timeout`、`model_http_error`、`model_invalid_output` 为主错误分类，旧 `model_unavailable`/`invalid_model_response` 仅作兼容别名；统计时不得重复计数。六用例三轮与附加 P6 检查分开汇总。程序只做既有证据渲染，不存在 R5 自动收尾；该列应为 0，不能将现有金额格式化误算为新增收尾能力。
+
+修复验证：原 `verify_agent.py`、新增 `verify_repairs.py`、`verify_memory.py`、`verify_ui.py`、`verify_https.py`、`verify_access.py`、`verify.py`、`verify.py --p3`、`verify_bank.py`、`verify_agent.py --details`、`verify_import.py`、`verify_restore.py`，以及 Java `mvn test`、Agent `python -m unittest discover -s tests -v`。这些写入检查仅在 P8 测试副本中顺序执行；真实模型三轮在它们通过之后另行恢复初始数据库运行。真实模型脚本失败返回非零不等于验证器失效，必须保留失败记录。

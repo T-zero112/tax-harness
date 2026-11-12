@@ -17,7 +17,8 @@ def reconfigure(unconfigured=False):
     args=COMPOSE+FILES+(['-f',str(ROOT/'compose.agent-unconfigured.yaml')] if unconfigured else [])
     subprocess.run(args+['up','-d','--no-deps','--force-recreate','--wait','agent'],check=True)
 def verify():
-    assert os.environ.get('COMPOSE_PROJECT_NAME','').startswith('tax-product-p7'),'Disposable P7 project required'
+    v.require_p8_target()
+    assert os.environ.get('COMPOSE_PROJECT_NAME','').startswith(('tax-product-p7','tax-product-p8')),'Disposable P7 project required'
     folder=ROOT.parent/'data'/('p7-ui-'+time.strftime('%Y%m%d-%H%M%S'));folder.mkdir(parents=True)
     config=dict(line.split('=',1) for line in (ROOT/'.env').read_text().splitlines() if '=' in line)
     alpha=v.login('alpha');base='/api/enterprises/C001/chat'

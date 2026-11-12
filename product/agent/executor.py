@@ -23,7 +23,7 @@ class State(TypedDict, total=False):
     evidence: list
     requirements: list
     registered: bool
-    feedback: str
+    feedback: str | dict
     decision: object
     arguments: dict
     tool: str
@@ -41,10 +41,11 @@ def decide(state):
     if state["steps"] >= 6 or time.monotonic() - state["started"] > 720:
         return {"route": "finish", "events": [event("error", {"code": "step_limit", "message": "本轮未完成，请缩小问题后重试。"}),
                                               event("done", {"status": "incomplete"})]}
+    telemetry={}
     try:
         state["memory"]["registered"] = state["registered"]
         decision = model_adapter.decide(context.messages(state["scope"], state["body"]["message"],
-            state["memory"], state["evidence"], state["feedback"], state["requirements"], state["memory"]["trace"]))
+            state["memory"], state["evidence"], state["feedback"], state["requirements"], state["memory"]["trace"]), telemetry)
         state["memory"]["trace"]["decisions"].append(decision.model_dump())
         return {"decision": decision, "steps": state["steps"] + 1, "route": "validate", "events": []}
     except (ValueError, KeyError, TypeError) as error:
@@ -55,11 +56,16 @@ def decide(state):
         code = "unknown_tool" if str(error)=="unknown_tool" else "invalid_model_response"
         state["memory"]["trace"]["decisions"].append({"kind":"invalid","code":code})
         return {"steps": state["steps"] + 1, "route": "decide", "feedback": guards.feedback(code,state["requirements"],state["evidence"],state["memory"]),
-                "events": [event("status", {"code":code,"message":guards.feedback(code)["reason"]})]}
-    except httpx.HTTPError:
-        state["memory"]["trace"]["decisions"].append({"kind": "invalid", "code": "model_unavailable"})
-        return {"route": "finish", "events": [event("error", {"code": "model_unavailable", "message": "模型请求失败或超时，待办已保留。"}),
+                "events": [event("status", {"code":"model_invalid_output","detail_code":code,"message":guards.feedback(code)["reason"]}), event("status", {"code":code,"alias_of":"model_invalid_output","message":guards.feedback(code)["reason"]})]}
+    except httpx.HTTPError as error:
+        code="model_timeout" if isinstance(error,httpx.TimeoutException) else "model_http_error"
+        state["memory"]["trace"]["decisions"].append({"kind": "invalid", "code":code})
+        return {"route": "finish", "events": [event("error", {"code":code,"message":"模型调用超时，待办已保留。" if code=="model_timeout" else "模型接口请求失败，待办已保留。"}),
+                                              event("error", {"code": "model_unavailable", "alias_of":code,"message": "模型请求失败或超时，待办已保留。"}),
                                               event("done", {"status": "incomplete"})]}
+    finally:
+        if telemetry:state["memory"]["trace"].setdefault("model_calls",[]).append(telemetry)
+
 
 
 def validate(state):
@@ -241,6 +247,8 @@ def stream(body):
         yield entry
     trace.update(status=final["status"], reply=reply, steps=len(trace["decisions"]),
                  model_name=os.getenv("PRODUCT_MODEL_NAME", ""),
+                 model_duration_ms=sum(c["duration_ms"] for c in trace.get("model_calls",[])),
+                 token_usage={k:sum(c.get("usage",{}).get(k,0) for c in trace.get("model_calls",[])) for k in ("prompt_tokens","completion_tokens","total_tokens")},
                  duration_ms=int((time.monotonic() - started) * 1000),
                  guard_codes=[e["data"]["code"] for e in trace["events"]
                               if e["event"] in ("status", "error") and "code" in e["data"]])

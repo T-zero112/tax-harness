@@ -5,6 +5,7 @@ import verify_agent as v
 import verify_memory as m
 
 def run():
+ v.require_p8_target()
  assert os.getenv('COMPOSE_PROJECT_NAME','').startswith('tax-product-p8')
  a=v.login('alpha');b=v.login('beta');base=m.BASE
  def call(client,path,body=None,expected=200,headers=None):return json.loads(v.request(client,path,body,expected,headers))
@@ -19,6 +20,11 @@ def run():
   task=es[-1]['data']['task_id'];rows=call(client,'/api/enterprises/'+enterprise+'/chat/tasks/'+task+'/traces')
   return json.loads(rows[-1]['summary']['context_snapshots'][-1]['messages'][-1]['content'])
  own=context(a);assert any(str(x['proposal_id'])==proposal and x['state']=='confirmed' for x in own['recent_operations'])
+ events=v.turn(a,'case=p8_operation F001 有没有保存',str(uuid4()))
+ assert events[-1]['data']['status']=='succeeded'
+ proofs=[e['data'] for e in events if e['event']=='tool_result' and e['data']['tool']=='get_operation']
+ assert len(proofs)==1 and str(proofs[0]['result']['data']['operation']['proposal_id'])==proposal
+ assert proofs[0]['result']['data']['operation']['state']=='confirmed'
  assert all(str(x['proposal_id'])!=proposal for x in context(b)['recent_operations'])
  assert all(str(x['proposal_id'])!=proposal for x in context(a,'C002')['recent_operations'])
  assert all(str(x['proposal_id'])!=proposal for x in context(a,'C001','2026-08')['recent_operations'])

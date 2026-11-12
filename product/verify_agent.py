@@ -18,6 +18,18 @@ BASE = os.getenv("PRODUCT_TEST_BASE", "https://127.0.0.1:13446")
 COMPOSE = ["docker", "compose", "--project-directory", str(ROOT)]
 
 
+def require_p8_target():
+    """An explicit P8 project name never authorizes main-workbench requests."""
+    if not os.getenv("COMPOSE_PROJECT_NAME", "").startswith("tax-product-p8"):
+        return
+    from urllib.parse import urlsplit
+    target=urlsplit(BASE)
+    assert target.scheme=="https" and target.hostname in ("localhost","127.0.0.1") and target.port!=3443, "P8 HTTPS isolation required"
+    files=["-f",str(ROOT/"compose.yaml"),"-f",str(ROOT/"compose.https.yaml")]
+    port=subprocess.check_output(COMPOSE+files+["port","gateway","443"]).decode().strip().rsplit(":",1)[-1]
+    assert str(target.port)==port,"P8 URL must match this project's gateway"
+
+
 def fake_decision(payload):
     current = json.loads(payload["messages"][-1]["content"])
     text = current["message"]
@@ -147,6 +159,7 @@ def check(condition, label):
 
 
 def verify():
+    require_p8_target()
     alpha, beta = login("alpha"), login("beta")
     events=turn(alpha,"case=summary 请查发票合计、银行收入、银行支出和规则")
     check(events[-1]["data"]["status"]=="succeeded","invoice/bank/rule evidence and program-rendered amounts")
@@ -211,6 +224,7 @@ print('PASS internal credential alone cannot impersonate a user')
 
 
 def unconfigured():
+    require_p8_target()
     alpha=login("alpha")
     request(alpha,"/api/enterprises/C001/chat",
             {"session_id":str(uuid4()),"period":"2026-09","message":"查询 F001"},expected=503)
@@ -219,6 +233,7 @@ def unconfigured():
 
 
 def details():
+    require_p8_target()
     import io
     from openpyxl import Workbook
     import verify_import as imports
@@ -258,6 +273,7 @@ def details():
 
 
 def live():
+    require_p8_target()
     config=dict(line.split("=",1) for line in (ROOT/".env").read_text().splitlines() if "=" in line and not line.startswith("#"))
     if not config.get("PRODUCT_MODEL_BASE_URL") or not config.get("PRODUCT_MODEL_NAME"):
         raise RuntimeError("Set the isolated stack model configuration in product/.env before --live")

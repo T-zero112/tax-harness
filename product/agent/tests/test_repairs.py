@@ -46,3 +46,46 @@ class SchemaAndRequirements(unittest.TestCase):
         self.assertIn("confirmed",guards.render([req],[item],[proof]))
         proof["tool"]="get_invoice"
         with self.assertRaises(ValueError):guards.render([req],[item],[proof])
+
+
+class ModelTelemetry(unittest.TestCase):
+    def test_failure_codes_and_latency(self):
+        import model_adapter as m
+        import httpx
+        from unittest.mock import patch
+        for failure,code in [(httpx.ReadTimeout("timeout"),"model_timeout"),(httpx.ConnectError("connection"),"model_http_error"),(ValueError("schema"),"model_invalid_output")]:
+            telemetry={}
+            with patch.object(m,"_decide",side_effect=failure):
+                with self.assertRaises(type(failure)):m.decide([],telemetry)
+            self.assertEqual(telemetry["error_code"],code)
+            self.assertGreaterEqual(telemetry["duration_ms"],0)
+
+
+    def test_http_error_evidence_is_redacted(self):
+        import model_adapter as m
+        import httpx,os,tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        key="test-only-credential-not-a-real-key"
+        with tempfile.TemporaryDirectory() as folder:
+            client=httpx.Client(transport=httpx.MockTransport(lambda r:httpx.Response(400,json={"error":key})))
+            settings={"PRODUCT_MODEL_BASE_URL":"https://unit.test/v1","PRODUCT_MODEL_NAME":"test","PRODUCT_MODEL_API_KEY":key,"PRODUCT_MODEL_STRUCTURED":"none","PRODUCT_AGENT_EVIDENCE_DIR":folder}
+            record={}
+            with patch.dict(os.environ,settings),patch.object(m.httpx,"Client",return_value=client):
+                with self.assertRaises(httpx.HTTPStatusError):m.decide([],record)
+            self.assertEqual(record["error_code"],"model_http_error")
+            self.assertEqual(record["http_status"],400)
+            self.assertNotIn(key,next(Path(folder).glob("*.json")).read_text())
+
+
+    def test_malformed_envelopes_are_invalid_output(self):
+        import model_adapter as m
+        import httpx,os
+        from unittest.mock import patch
+        settings={"PRODUCT_MODEL_BASE_URL":"https://unit.test/v1","PRODUCT_MODEL_NAME":"test","PRODUCT_MODEL_API_KEY":"","PRODUCT_MODEL_STRUCTURED":"none","PRODUCT_AGENT_EVIDENCE_DIR":""}
+        for payload in ([],{}, {"choices":[]},{"choices":[None]},{"choices":[{"message":None}]}):
+            client=httpx.Client(transport=httpx.MockTransport(lambda r:httpx.Response(200,json=payload)))
+            record={}
+            with patch.dict(os.environ,settings),patch.object(m.httpx,"Client",return_value=client):
+                with self.assertRaises(ValueError):m.decide([],record)
+            self.assertEqual(record["error_code"],"model_invalid_output")

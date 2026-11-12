@@ -1,6 +1,7 @@
 """OpenAI-compatible model boundary. Credentials never enter conversation state."""
 import json
 import os
+import time
 from pathlib import Path
 
 import httpx
@@ -89,7 +90,25 @@ def redact(text):
     return text
 
 
-def decide(messages):
+def decide(messages, telemetry=None):
+    telemetry = telemetry if telemetry is not None else {}
+    started = time.monotonic()
+    try:
+        return _decide(messages, telemetry)
+    except httpx.TimeoutException:
+        telemetry["error_code"]="model_timeout"
+        raise
+    except httpx.HTTPError:
+        telemetry["error_code"]="model_http_error"
+        raise
+    except (ValueError,KeyError,TypeError):
+        telemetry["error_code"]="model_invalid_output"
+        raise
+    finally:
+        telemetry["duration_ms"]=int((time.monotonic()-started)*1000)
+
+
+def _decide(messages, telemetry):
     base = os.environ["PRODUCT_MODEL_BASE_URL"].rstrip("/")
     body = {"model": os.environ["PRODUCT_MODEL_NAME"], "messages": messages, "temperature": 0, "max_tokens": 2048}
     if os.getenv("PRODUCT_MODEL_STRUCTURED", "none") == "schema":
@@ -102,7 +121,7 @@ def decide(messages):
     timeout = min(300, max(1, float(os.getenv("PRODUCT_MODEL_TIMEOUT", "120"))))
     with httpx.Client(timeout=timeout, trust_env=False) as client:
         response = client.post(base + "/chat/completions", json=body, headers=headers)
-        response.raise_for_status()
+        telemetry["http_status"]=response.status_code
         raw = response.text
     evidence = os.getenv("PRODUCT_AGENT_EVIDENCE_DIR")
     if evidence:
@@ -112,9 +131,21 @@ def decide(messages):
         folder.mkdir(parents=True, exist_ok=True)
         (folder / (str(uuid.uuid4()) + ".json")).write_text(
             redact(json.dumps({"request": body, "response": raw}, ensure_ascii=False)), encoding="utf-8")
+    response.raise_for_status()
+    if key and key in raw:
+        raise ValueError("credential_in_model_output")
     if len(raw.encode()) > 262144:
         raise ValueError("model_response_too_large")
-    content = json.loads(raw)["choices"][0]["message"]["content"]
+    payload=json.loads(raw)
+    if not isinstance(payload,dict):raise ValueError("invalid_model_response")
+    usage=payload.get("usage") or {}
+    if not isinstance(usage,dict):raise ValueError("invalid_model_response")
+    telemetry["usage"]={k:v for k,v in usage.items() if k in ("prompt_tokens","completion_tokens","total_tokens") and isinstance(v,int)}
+    choices=payload.get("choices")
+    if not isinstance(choices,list) or not choices or not isinstance(choices[0],dict):raise ValueError("invalid_model_response")
+    message=choices[0].get("message")
+    if not isinstance(message,dict):raise ValueError("invalid_model_response")
+    content = message.get("content")
     if not isinstance(content, str):
         raise ValueError("invalid_model_response")
     text = content.strip()
