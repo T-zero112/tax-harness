@@ -26,15 +26,17 @@ public class AgentChat {
     private final AgentTasks tasks;
     private final AgentOperations operations;
     private final AgentRedaction redaction;
+    private final RecentOperations recent;
     private final HttpClient agent = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
 
     public AgentChat(Business sessions, ChatScopes scopes, Invoices invoices, Rules rules,
-                     JdbcTemplate jdbc, ObjectMapper json, AgentTasks tasks, AgentOperations operations, AgentRedaction redaction) {
+                     JdbcTemplate jdbc, ObjectMapper json, AgentTasks tasks, AgentOperations operations, AgentRedaction redaction, RecentOperations recent) {
         this.sessions=sessions; this.scopes=scopes; this.invoices=invoices;
         this.rules=rules; this.jdbc=jdbc; this.json=json;
         this.tasks=tasks;
         this.operations=operations;
         this.redaction=redaction;
+        this.recent=recent;
     }
 
     record Turn(UUID session_id, String period, String message, UUID task_id) {}
@@ -129,6 +131,8 @@ public class AgentChat {
                 case "create_proposal" -> createProposal(lease,invoice,args,current);
                 default -> operation(lease,invoice,args.path("proposal_id").asText());
             };
+        } else if (tool.equals("list_recent_operations")) {
+            data=Map.of("operations",recent.read(lease,args.hasNonNull("invoice_id")?invoice:null,args.path("limit").asInt(5)));
         } else if (tool.equals("search_rules")) {
             data=Map.of("rules",rules.search(cookie,enterprise,lease.period(),args.path("query").asText("发票用途")));
         } else if (tool.equals("list_invoices")) {
@@ -190,15 +194,16 @@ public class AgentChat {
     private Object operation(ChatScopes.Lease lease,String invoice,String proposal) {
         UUID id;
         try { id=UUID.fromString(proposal); } catch (RuntimeException error) { throw bad(); }
+        var actor=sessions.authorize(lease.session(),lease.enterprise_id(),Business.Access.READ);
         var rows=jdbc.queryForList("select p.proposal_id, p.expected_revision, p.changes, "
                 +"coalesce(a.operation_id,(select o.operation_id from agent_operation o where o.proposal_id=p.proposal_id "
                 +"and o.kind='proposal' order by o.created_at limit 1)) as operation_id, "
                 +"case when a.proposal_id is not null then 'confirmed' when p.chat_scope_id is not null and "
                 +"p.chat_generation<>s.generation then 'expired' else 'pending' end as state "
-                +"from invoice_proposal p left join invoice_audit a on p.proposal_id=a.proposal_id "
+                +"from invoice_proposal p join agent_task t on t.task_id=p.task_id left join invoice_audit a on p.proposal_id=a.proposal_id "
                 +"left join agent_chat_scope s on p.chat_scope_id=s.scope_id "
-                +"where p.tenant_id=? and p.enterprise_id=? and p.invoice_id=? and p.proposal_id=?",
-                lease.tenant_id(),lease.enterprise_id(),invoice,id);
+                +"where p.tenant_id=? and p.enterprise_id=? and p.invoice_id=? and p.proposal_id=? and t.account_id=?",
+                lease.tenant_id(),lease.enterprise_id(),invoice,id,actor.id());
         if (rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND);
         return Map.of("operation",rows.getFirst(),"record",invoices.get(lease.session(),lease.enterprise_id(),invoice));
     }

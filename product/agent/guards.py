@@ -98,6 +98,10 @@ def render(requirements, items, evidence):
                 raise ValueError("evidence_mismatch")
             expected = dict(req.filters)
             actual = dict(proof["arguments"])
+            if req.kind == "operation" and "proposal_id" not in expected:
+                if str(proof["result"].get("data",{}).get("operation",{}).get("proposal_id")) != str(actual.get("proposal_id")):
+                    raise ValueError("evidence_mismatch")
+                actual.pop("proposal_id",None)
             if req.kind == "rules" and not expected:
                 actual.pop("query", None)
             if req.kind in ("income_total", "expense_total"):

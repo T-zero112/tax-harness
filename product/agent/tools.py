@@ -34,7 +34,11 @@ class Operation(InvoiceId):
     proposal_id: str = Field(pattern=r"^[a-fA-F0-9-]{36}$")
 
 
-TOOLS = {"list_invoices": InvoiceFilter, "list_bank_transactions": BankFilter, "get_invoice": InvoiceId,
+class RecentOperations(InvoiceFilter):
+    limit: int = Field(default=5, ge=1, le=5)
+
+
+TOOLS = {"list_recent_operations": RecentOperations, "list_invoices": InvoiceFilter, "list_bank_transactions": BankFilter, "get_invoice": InvoiceId,
          "search_rules": RuleQuery, "check_purpose": InvoiceId, "create_proposal": Proposal, "get_operation": Operation}
 
 

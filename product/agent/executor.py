@@ -82,6 +82,12 @@ def validate(state):
             if name not in tools.TOOLS:
                 raise ValueError("unknown_tool")
             arguments = tools.TOOLS[name].model_validate(decision.arguments).model_dump(exclude_none=True)
+            if name == "get_operation":
+                known = state["memory"].get("recent_operations", [])
+                pointer = state["memory"].get("proposal")
+                if pointer: known = known + [pointer]
+                if not any(str(p.get("proposal_id"))==arguments["proposal_id"] and p.get("invoice_id")==arguments["invoice_id"] for p in known) and arguments["proposal_id"] not in state["body"]["message"]:
+                    raise ValueError("operation_target_unverified")
             if name == "create_proposal":
                 expected = guards.target(state["body"]["message"], state["memory"]["pending"])
                 if expected != arguments["invoice_id"]:
@@ -115,7 +121,7 @@ def validate(state):
     except (ValueError, TypeError, KeyError) as error:
         code = str(error) if str(error) in {
             "unknown_tool", "proposal_target_unverified", "proposal_value_unverified", "amount_unverified",
-            "proposal_claim_without_event", "proposal_evidence_missing", "empty_reply", "answer_items_incomplete", "evidence_mismatch",
+            "operation_target_unverified", "proposal_claim_without_event", "proposal_evidence_missing", "empty_reply", "answer_items_incomplete", "evidence_mismatch",
             "direction_mismatch", "filter_mismatch", "invoice_amount_unknown", "list_incomplete",
             "evidence_conflict", "requirements_missing", "requirements_fixed", "duplicate_requirements"
         } else "invalid_arguments"

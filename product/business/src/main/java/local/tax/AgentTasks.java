@@ -28,6 +28,7 @@ public class AgentTasks {
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
     private final AgentRedaction redaction;
+    private final RecentOperations recent;
     private final StringRedisTemplate redis;
     private final TransactionTemplate transaction;
     private final ScheduledExecutorService renewal = Executors.newScheduledThreadPool(2);
@@ -37,12 +38,13 @@ public class AgentTasks {
         "if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end",Long.class);
 
     public AgentTasks(Business sessions, ChatScopes scopes, JdbcTemplate jdbc, ObjectMapper json,
-                      AgentRedaction redaction, StringRedisTemplate redis, PlatformTransactionManager manager) {
+                      AgentRedaction redaction, StringRedisTemplate redis, PlatformTransactionManager manager, RecentOperations recent) {
         this.sessions = sessions;
         this.scopes = scopes;
         this.jdbc = jdbc;
         this.json = json;
         this.redaction = redaction;
+        this.recent = recent;
         this.redis = redis;
         transaction = new TransactionTemplate(manager);
     }
@@ -272,6 +274,7 @@ public class AgentTasks {
         out.put("task",taskJson(row));
         out.put("matches_period",!lease.read_only());
         out.put("history",history);
+        out.put("recent_operations",recent.read(lease,null,5));
         out.put("pending",lease.read_only() ? null : row.get("object_id"));
         out.put("pending_messages",values);
         out.put("proposal",lease.read_only() ? null : proposalPointer(row));
