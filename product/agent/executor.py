@@ -91,11 +91,14 @@ def validate(state):
                 if not changes or any(not v.strip() or len(v) > 500 or v not in user_text for v in changes.values()):
                     raise ValueError("proposal_value_unverified")
             return {**update, "tool": name, "arguments": arguments, "route": "execute", "events": []}
-        reason = guards.safe_reply(decision.message, state["evidence"])
+        claim = guards.proposal_claim(decision, state["memory"]["trace"].get("events", []), state["evidence"])
+        if claim:
+            raise ValueError(claim)
+        reason = guards.safe_reply(decision.message, state["evidence"], state["memory"]["trace"].get("events", []))
         if reason:
             raise ValueError(reason)
         if decision.kind == "ask":
-            if re.search(r"已(?:经)?(?:保存|写入|修改|补充|提出|生成)|建议已", decision.message):
+            if re.search(r"已(?:经)?(?:保存|写入|修改|补充|提出|生成)|建议已", decision.message) and not any(e.get("event")=="proposal" and e.get("data",{}).get("proposal",{}).get("proposal_id") and e.get("data",{}).get("operation_id") for e in state["memory"]["trace"].get("events",[])):
                 raise ValueError("proposal_evidence_missing")
             if re.search(r"[¥￥]\s*\d|\d[\d,.]*\s*(?:元|万元|分)(?!钟)", decision.message):
                 raise ValueError("amount_unverified")
@@ -112,12 +115,16 @@ def validate(state):
     except (ValueError, TypeError, KeyError) as error:
         code = str(error) if str(error) in {
             "unknown_tool", "proposal_target_unverified", "proposal_value_unverified", "amount_unverified",
-            "proposal_evidence_missing", "empty_reply", "answer_items_incomplete", "evidence_mismatch",
+            "proposal_claim_without_event", "proposal_evidence_missing", "empty_reply", "answer_items_incomplete", "evidence_mismatch",
             "direction_mismatch", "filter_mismatch", "invoice_amount_unknown", "list_incomplete",
             "evidence_conflict", "requirements_missing", "requirements_fixed", "duplicate_requirements"
         } else "invalid_arguments"
-        return {"route": "decide", "feedback": code, "requirements": requirements, "registered": registered,
-                "events": [event("status", {"code": code, "message": "当前答案或操作缺少匹配证据，正在重新核对。"})]}
+        message = "本轮没有生成提案。要修改就调用 propose 工具，否则如实说明尚未生成。" if code == "proposal_claim_without_event" else "当前答案或操作缺少匹配证据，正在重新核对。"
+        events = [event("status", {"code":code,"message":message})]
+        if code == "proposal_claim_without_event":
+            events.append(event("status", {"code":"proposal_evidence_missing","message":message,"alias_of":code}))
+        return {"route":"decide","feedback":message if code=="proposal_claim_without_event" else code,
+                "requirements":requirements,"registered":registered,"events":events}
 
 
 def execute(state):

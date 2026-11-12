@@ -25,6 +25,7 @@ class AnswerItem(StrictModel):
 
 
 class DecisionFields(StrictModel):
+    claims_proposal: bool = False
     tool: str | None = None
     arguments: dict = Field(default_factory=dict)
     message: str = Field(default="", max_length=3000)
