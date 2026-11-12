@@ -100,3 +100,14 @@ class ModelTelemetry(unittest.TestCase):
         self.assertFalse(changes["additionalProperties"])
         self.assertEqual(changes["minProperties"],1)
         for value in changes["properties"].values():self.assertEqual(value["maxLength"],500)
+
+
+class SummaryCompletionIsNotProposalClaim(unittest.TestCase):
+    def test_finished_summary_is_not_claim(self):
+        from types import SimpleNamespace
+        for text in ["已完成本月汇总：发票合计、银行收入、银行支出均已取得证据。", "已完成本月汇总：以系统渲染结果为准。"]:
+            self.assertIsNone(guards.proposal_claim(SimpleNamespace(message=text,claims_proposal=False),[]))
+    def test_finished_write_is_still_claim(self):
+        from types import SimpleNamespace
+        for text in ["已完成修改", "已经完成用途填写的提案"]:
+            self.assertEqual(guards.proposal_claim(SimpleNamespace(message=text,claims_proposal=False),[]),"proposal_claim_without_event")

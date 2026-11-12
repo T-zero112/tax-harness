@@ -197,7 +197,8 @@ def proposal_claim(decision, events, evidence=()):
     real = any(e.get("event") == "proposal" and e.get("data", {}).get("proposal", {}).get("proposal_id")
                and e.get("data", {}).get("operation_id") for e in events)
     text = decision.message
-    completion = re.search(r"(?:已(?:经)?[^。！？\n]{0,60}(?:生成|提交|创建|保存|更新|完成|准备好)|(?:建议|提案|修改)[^。！？\n]{0,15}已(?:提交|生成|完成|保存))", text)
+    # "已完成本月汇总" is a normal answer; only completion of a write-like object counts as a proposal claim.
+    completion = re.search(r"(?:已(?:经)?[^。！？\n]{0,60}(?:生成|提交|创建|保存|更新|准备好)|已(?:经)?完成[^。！？\n]{0,8}(?:修改|提案|建议|更新|保存|填写|写入)|(?:建议|提案|修改)[^。！？\n]{0,15}已(?:提交|生成|完成|保存))", text)
     # A verified operation read can prove an existing save; it does not prove a new proposal this turn.
     saved = any(p.get("tool")=="get_operation" and p.get("result",{}).get("status")=="succeeded" and p.get("result",{}).get("data",{}).get("operation",{}).get("state")=="confirmed" for p in evidence)
     existing_save = saved and bool(re.search(r"保存|写入|更新",text)) and not re.search(r"生成|提交|创建|准备好",text)
