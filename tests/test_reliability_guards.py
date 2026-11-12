@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from tax_harness.app import create_app
 from tax_harness.contracts import ContextBundle
 from tax_harness.model_adapter import (
-    TIMEOUT_MESSAGE, ChatCompletionsModel, ModelUnavailable, configured_model,
+    TIMEOUT_MESSAGE, ChatCompletionsModel, InvalidDecision, ModelUnavailable, configured_model,
 )
 from test_agent import HEADERS, PARAMS, seed, send
 
@@ -100,6 +100,55 @@ def test_fix1_confirmation_does_not_call_the_model_or_write_twice(tmp_path):
         with app.state.database.connect() as connection:
             assert connection.execute("SELECT count(*) FROM operations").fetchone()[0] == 1
             assert connection.execute("SELECT purpose FROM invoices").fetchone()[0] == "办公资料"
+
+
+def decide_from(content):
+    model = ChatCompletionsModel(
+        "https://model.test/v1/chat/completions", "fixture", "fixture-key",
+        transport=httpx.MockTransport(lambda request: httpx.Response(
+            200, json={"choices": [{"message": {"content": content}}]},
+        )),
+    )
+    return model.decide(context())
+
+
+def test_fix2_unwraps_tool_call_and_json_fence_without_relaxing_schema():
+    tool = '{"kind":"tool","name":"list_invoices","arguments":{}}'
+    ask = '{"kind":"ask","reply":"请补充发票编号"}'
+    answer = '{"kind":"answer","reply":"已核对"}'
+    assert decide_from(tool).name == "list_invoices"
+    assert decide_from(f"<tool_call>\n{tool}\n</tool_call>").name == "list_invoices"
+    assert decide_from(f"```json\n{ask}\n```").reply == "请补充发票编号"
+    assert decide_from(f"<tool_call>\n```json\n{answer}\n```\n</tool_call>").reply == "已核对"
+    assert decide_from(f"先查询。\n<tool_call>{tool}</tool_call>").name == "list_invoices"
+    with pytest.raises(InvalidDecision):
+        decide_from(f"<tool_call>{tool[:-1]},\"extra\":1}}</tool_call>")
+    with pytest.raises(InvalidDecision):
+        decide_from('```json\n{"kind":"ask"}\n```')
+    with pytest.raises(InvalidDecision):
+        decide_from('请查询 {"kind":"answer","reply":"已核对"}')
+    with pytest.raises(InvalidDecision):
+        decide_from(f"<tool_call>{tool}</tool_call><tool_call>{ask}</tool_call>")
+
+
+def test_fix2_wrapped_tool_call_runs_the_registered_tool(tmp_path):
+    contents = iter([
+        '<tool_call>{"kind":"tool","name":"list_invoices","arguments":{}}</tool_call>',
+        '```json\n{"kind":"answer","reply":"发票共 501.00 元。"}\n```',
+    ])
+    model = ChatCompletionsModel(
+        "https://model.test/v1/chat/completions", "fixture", "fixture-key",
+        transport=httpx.MockTransport(lambda request: httpx.Response(
+            200, json={"choices": [{"message": {"content": next(contents)}}]},
+        )),
+    )
+    app = create_app(tmp_path / "wrapped.sqlite3", model=model)
+    with TestClient(app) as client:
+        seed(app)
+        response = send(client, "wrapped", "查询发票总额")
+        assert response.status_code == 200 and response.json()["reply"] == "发票共 501.00 元。"
+        with app.state.database.connect() as connection:
+            assert connection.execute("SELECT count(*) FROM events WHERE kind='tool_result'").fetchone()[0] == 1
 
 
 def test_fix1_timeout_and_openai_compatible_settings(monkeypatch):

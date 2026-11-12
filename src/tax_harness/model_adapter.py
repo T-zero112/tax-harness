@@ -1,4 +1,5 @@
 import os
+import re
 from math import isfinite
 from typing import Annotated, Literal, Protocol
 
@@ -40,6 +41,32 @@ class ModelUnavailable(RuntimeError):
 
 class InvalidDecision(ValueError):
     pass
+
+
+_TOOL_CALL = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL | re.IGNORECASE)
+_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+
+
+def unwrap_decision_content(content: str) -> str:
+    """Strip one <tool_call> or fenced JSON wrapper. Field validation stays strict."""
+    text = content.strip()
+    for _ in range(3):
+        tool_calls = _TOOL_CALL.findall(text)
+        fences = _FENCE.findall(text)
+        if len(tool_calls) == 1 and not fences:
+            text = tool_calls[0].strip()
+            continue
+        if len(fences) == 1 and not tool_calls:
+            text = fences[0].strip()
+            continue
+        if len(tool_calls) == 1 and len(fences) == 1:
+            inner_tool = tool_calls[0].strip()
+            inner_fence = fences[0].strip()
+            if inner_fence in inner_tool or inner_tool in inner_fence:
+                text = inner_tool if inner_fence in inner_tool else inner_fence
+                continue
+        break
+    return text
 
 
 TIMEOUT_MESSAGE = "模型请求超时，本次没有得到可用结果。请稍后使用新的请求编号重试。"
@@ -99,10 +126,17 @@ class ChatCompletionsModel:
                 raise ModelUnavailable(REQUEST_FAILED_MESSAGE) from exc
         else:
             raise ModelUnavailable(TIMEOUT_MESSAGE) from last_timeout
+        text = content.strip()
         try:
-            return DECISION.validate_json(content)
-        except (TypeError, ValueError) as exc:
-            raise InvalidDecision("模型返回的动作格式无效。") from exc
+            return DECISION.validate_json(text)
+        except (TypeError, ValueError) as first_error:
+            unwrapped = unwrap_decision_content(text)
+            if unwrapped == text:
+                raise InvalidDecision("模型返回的动作格式无效。") from first_error
+            try:
+                return DECISION.validate_json(unwrapped)
+            except (TypeError, ValueError) as exc:
+                raise InvalidDecision("模型返回的动作格式无效。") from exc
 
 
 def configured_model() -> ChatCompletionsModel | None:
